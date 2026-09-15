@@ -10,8 +10,9 @@ from __future__ import annotations
 import pygame
 
 import settings as S
+from backdrop import Backdrop
 from game import GameState
-from scenes import GameScene, StartScene, make_background
+from scenes import GameScene, StartScene
 
 
 class App:
@@ -23,7 +24,7 @@ class App:
         self.screen = pygame.display.set_mode((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
         self.clock = pygame.time.Clock()
         self.running = True
-        self.background = make_background((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
+        self.backdrop = Backdrop((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
         self.state = GameState(0)
         self.scene = StartScene(self)
 
@@ -58,7 +59,8 @@ class App:
                 break
 
             self.scene.update(dt)
-            self.screen.blit(self.background, (0, 0))
+            self.backdrop.update(dt)
+            self.backdrop.draw(self.screen)
             self.scene.draw(self.screen)
             pygame.display.flip()
 

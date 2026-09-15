@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-"""界面基础组件：字体、颜色工具、圆角矩形与阴影、箭头图形、按钮。
+"""界面基础组件：字体、颜色工具、渐变与阴影、箭头贴图、按钮控件。
 
 这一层不含任何游戏规则，只负责"画出来"和"接收点击"。
+较贵的绘制结果（渐变、光晕、圆角面板、箭头贴图）全部做了缓存，
+运行时每帧基本只剩 blit。
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import pygame
 
 import settings as S
 
-# ------------------------------------------------------------------ 颜色工具
+# ==================================================================== 颜色工具
 
 
 def _clamp(value, low=0, high=255):
@@ -34,7 +36,7 @@ def mix(color_a, color_b, t):
     return tuple(_clamp(a + (b - a) * t) for a, b in zip(color_a[:3], color_b[:3]))
 
 
-# ------------------------------------------------------------------ 字体
+# ==================================================================== 字体
 # 中文必须指定字体文件，pygame 默认字体画不出汉字，所以按优先级找一个可用的。
 _FONT_REGULAR_CANDIDATES = (
     r"C:\Windows\Fonts\msyh.ttc",        # 微软雅黑
@@ -82,6 +84,10 @@ def font(size, bold=False):
     return _font_cache[key]
 
 
+def text_width(text, size, bold=False):
+    return font(size, bold).size(text)[0]
+
+
 def draw_text(surface, text, size, color, pos, anchor="center", bold=False):
     """画一行文字。anchor 支持 pygame.Rect 的各种锚点名，如 center / midleft。"""
     image = font(size, bold).render(text, True, color)
@@ -91,8 +97,101 @@ def draw_text(surface, text, size, color, pos, anchor="center", bold=False):
     return rect
 
 
-# ------------------------------------------------------------------ 圆角矩形与阴影
+# ==================================================================== 渐变、形状、光晕
+_gradient_cache = {}
+_shape_cache = {}
+_glow_cache = {}
 _shadow_cache = {}
+
+
+def vertical_gradient(size, top_color, bottom_color):
+    """竖向渐变的不透明贴图。"""
+    key = (size, top_color, bottom_color)
+    if key not in _gradient_cache:
+        width, height = max(1, int(size[0])), max(1, int(size[1]))
+        surface = pygame.Surface((width, height))
+        for y in range(height):
+            t = y / max(1, height - 1)
+            pygame.draw.line(surface, mix(top_color, bottom_color, t), (0, y), (width, y))
+        _gradient_cache[key] = surface
+    return _gradient_cache[key]
+
+
+def round_rect_surface(size, radius, top_color, bottom_color=None,
+                       border_color=None, border_width=0,
+                       highlight=False, shade=False, recess=False):
+    """带圆角、竖向渐变、可选描边和高光/暗边的贴图。
+
+    highlight / shade 给凸起的面板用（上亮下暗）；
+    recess 给内凹的凹槽用（上暗下亮），两者的光照方向相反。
+    """
+    key = (size, radius, top_color, bottom_color, border_color, border_width,
+           highlight, shade, recess)
+    if key in _shape_cache:
+        return _shape_cache[key]
+
+    width, height = max(1, int(size[0])), max(1, int(size[1]))
+    radius = max(0, min(int(radius), width // 2, height // 2))
+    bottom_color = top_color if bottom_color is None else bottom_color
+
+    mask = pygame.Surface((width, height), pygame.SRCALPHA)
+    pygame.draw.rect(mask, (255, 255, 255, 255), pygame.Rect(0, 0, width, height),
+                     border_radius=radius)
+    body = vertical_gradient((width, height), top_color, bottom_color).convert_alpha()
+    body.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+    if width > radius * 2 + 4:
+        edges = pygame.Surface((width, height), pygame.SRCALPHA)
+        if highlight:
+            pygame.draw.line(edges, (*lighten(top_color, 0.55), 74),
+                             (radius, 1), (width - radius, 1), 1)
+        if shade:
+            pygame.draw.line(edges, (*darken(bottom_color, 0.40), 96),
+                             (radius, height - 2), (width - radius, height - 2), 1)
+        if recess:
+            pygame.draw.line(edges, (0, 0, 0, 120),
+                             (radius, 1), (width - radius, 1), 1)
+            pygame.draw.line(edges, (*lighten(bottom_color, 0.30), 60),
+                             (radius, height - 2), (width - radius, height - 2), 1)
+        body.blit(edges, (0, 0))
+
+    if border_color is not None and border_width > 0:
+        pygame.draw.rect(body, border_color, pygame.Rect(0, 0, width, height),
+                         width=border_width, border_radius=radius)
+
+    _shape_cache[key] = body
+    return body
+
+
+def radial_glow(radius, color, alpha=90, layers=40):
+    """柔和光晕。
+
+    注意 pygame.draw 在 SRCALPHA 面上是"覆盖"而不是"混合"，
+    所以不能靠层层叠加半透明圆来累积，必须由外向内画一圈圈
+    互不重叠、透明度递增的圆环。
+    """
+    key = (radius, color, alpha, layers)
+    if key not in _glow_cache:
+        radius = max(2, int(radius))
+        layers = max(2, int(layers))
+        size = radius * 2
+        surface = pygame.Surface((size, size), pygame.SRCALPHA)
+        for i in range(layers):
+            # i = 0 是最外圈（全透明），i = layers-1 是最内侧（最亮）
+            outer = radius * (layers - i) / layers
+            inner = radius * (layers - i - 1) / layers
+            t = i / (layers - 1)
+            ring_alpha = int(alpha * (t ** 1.6))
+            pygame.draw.circle(surface, (*color[:3], ring_alpha), (radius, radius),
+                               int(outer), max(1, int(outer - inner) + 1))
+        _glow_cache[key] = surface
+    return _glow_cache[key]
+
+
+def draw_glow(surface, center, radius, color, alpha=90, layers=40):
+    """在某个位置叠一团柔和光晕。"""
+    glow = radial_glow(int(radius), color, alpha=alpha, layers=layers)
+    surface.blit(glow, glow.get_rect(center=center))
 
 
 def _shadow_surface(width, height, radius, spread, alpha):
@@ -102,8 +201,7 @@ def _shadow_surface(width, height, radius, spread, alpha):
         surface = pygame.Surface((width + spread * 2, height + spread * 2), pygame.SRCALPHA)
         for i in range(spread, 0, -1):
             rect = pygame.Rect(spread - i, spread - i, width + i * 2, height + i * 2)
-            pygame.draw.rect(surface, (0, 0, 0, layer_alpha), rect,
-                             border_radius=radius + i)
+            pygame.draw.rect(surface, (0, 0, 0, layer_alpha), rect, border_radius=radius + i)
         _shadow_cache[key] = surface
     return _shadow_cache[key]
 
@@ -115,17 +213,40 @@ def draw_shadow(surface, rect, radius=16, spread=12, alpha=90, offset=(0, 5)):
 
 
 def draw_round_rect(surface, rect, color, radius=12, border_color=None, border_width=2):
-    """画圆角矩形（可选描边）。radius 会自动收敛，避免小矩形画崩。"""
+    """画一个纯色圆角矩形（用于一次性、不值得缓存的场合）。"""
     rect = pygame.Rect(rect)
     radius = max(0, min(int(radius), rect.width // 2, rect.height // 2))
     pygame.draw.rect(surface, color, rect, border_radius=radius)
     if border_color is not None and border_width > 0:
-        pygame.draw.rect(surface, border_color, rect,
-                         width=border_width, border_radius=radius)
+        pygame.draw.rect(surface, border_color, rect, width=border_width, border_radius=radius)
     return rect
 
 
-# ------------------------------------------------------------------ 箭头图形
+# ==================================================================== 渐变文字
+_text_cache = {}
+
+
+def gradient_text_surface(text, size, top_color, bottom_color, bold=False):
+    """把文字当作蒙版，和竖向渐变相乘，得到渐变文字。"""
+    key = ("grad", text, size, top_color, bottom_color, bold)
+    if key not in _text_cache:
+        base = font(size, bold).render(text, True, (255, 255, 255))
+        grad = vertical_gradient(base.get_size(), top_color, bottom_color).convert_alpha()
+        grad.blit(base, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        _text_cache[key] = grad
+    return _text_cache[key]
+
+
+def draw_text_gradient(surface, text, size, top_color, bottom_color, pos,
+                       anchor="center", bold=False):
+    image = gradient_text_surface(text, size, top_color, bottom_color, bold)
+    rect = image.get_rect()
+    setattr(rect, anchor, pos)
+    surface.blit(image, rect)
+    return rect
+
+
+# ==================================================================== 箭头
 # 归一化坐标下的"向上"箭头轮廓：箭尖在上，箭杆在下。
 # 换成其它方向只需把坐标绕中心旋转 90° 的整数倍。
 _ARROW_SHAPE = (
@@ -140,6 +261,8 @@ _ARROW_SHAPE = (
 
 _DIR_TURNS = {"up": 0, "right": 1, "down": 2, "left": 3}
 
+_arrow_cache = {}
+
 
 def arrow_polygon(center, size, direction):
     """算出某个方向上箭头的多边形顶点。"""
@@ -153,24 +276,77 @@ def arrow_polygon(center, size, direction):
     return points
 
 
-def draw_arrow(surface, center, size, direction, color, shadow=True):
-    """画一个箭头：先铺一层向下的投影，再画主体，最后加一圈亮边。"""
-    points = arrow_polygon(center, size, direction)
-    if shadow:
-        offset = max(2.0, size * 0.055)
-        pygame.draw.polygon(surface, darken(color, 0.72),
-                            [(x, y + offset) for x, y in points])
-    pygame.draw.polygon(surface, color, points)
-    pygame.draw.polygon(surface, lighten(color, 0.38), points,
-                        width=max(2, int(size * 0.03)))
+def _build_arrow_sprite(direction, size, color):
+    """把外发光、落地投影、渐变主体、亮边预先合成到一张贴图上。"""
+    base = arrow_polygon((0, 0), size, direction)
+    xs = [p[0] for p in base]
+    ys = [p[1] for p in base]
+    pad = size * 0.42
+    width = int((max(abs(min(xs)), abs(max(xs))) + pad) * 2)
+    height = int((max(abs(min(ys)), abs(max(ys))) + pad) * 2)
+    cx, cy = width / 2.0, height / 2.0
+    points = [(x + cx, y + cy) for x, y in base]
+
+    sprite = pygame.Surface((width, height), pygame.SRCALPHA)
+
+    # 1) 外发光：把略放大一圈的轮廓缩小再放大做出真实模糊，然后染成箭头颜色。
+    #    直接按比例缩放多边形做不出均匀光晕（细箭杆几乎不增长），所以走模糊这条路。
+    glow_mask = pygame.Surface((width, height), pygame.SRCALPHA)
+    pygame.draw.polygon(glow_mask, (255, 255, 255, 255),
+                        arrow_polygon((cx, cy), size * 1.12, direction))
+    step = (max(1, width // 7), max(1, height // 7))
+    blur = pygame.transform.smoothscale(glow_mask, step)
+    blur = pygame.transform.smoothscale(blur, (width, height))
+    blur = pygame.transform.smoothscale(blur, step)
+    blur = pygame.transform.smoothscale(blur, (width, height))
+    blur.fill((*color, 255), special_flags=pygame.BLEND_RGBA_MULT)
+    for _ in range(2):                  # blit 是混合语义，叠两次加深光晕
+        sprite.blit(blur, (0, 0))
+
+    # 2) 落地投影：几层偏移的暗色轮廓
+    for dy, alpha in ((size * 0.12, 20), (size * 0.08, 26), (size * 0.04, 34)):
+        pygame.draw.polygon(sprite, (3, 5, 12, alpha),
+                            [(x, y + dy) for x, y in points])
+
+    # 3) 主体：竖向渐变（上亮下暗）
+    mask = pygame.Surface((width, height), pygame.SRCALPHA)
+    pygame.draw.polygon(mask, (255, 255, 255, 255), points)
+    body = vertical_gradient((width, height),
+                             lighten(color, 0.30), darken(color, 0.24)).convert_alpha()
+    body.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    sprite.blit(body, (0, 0))
+
+    # 4) 亮边 + 内侧暗边，做出一点厚度
+    pygame.draw.polygon(sprite, (*lighten(color, 0.60), 205), points,
+                        width=max(2, int(size * 0.030)))
+    pygame.draw.polygon(sprite, (*darken(color, 0.45), 90),
+                        arrow_polygon((cx, cy), size * 0.90, direction),
+                        width=max(1, int(size * 0.018)))
+    return sprite
 
 
-# ------------------------------------------------------------------ 按钮
+def arrow_sprite(direction, size, color):
+    key = (direction, int(round(size)), color)
+    if key not in _arrow_cache:
+        _arrow_cache[key] = _build_arrow_sprite(direction, size, color)
+    return _arrow_cache[key]
+
+
+def draw_arrow(surface, center, size, direction, color, alpha=255, scale=1.0):
+    """在指定位置画一个箭头。scale 用于悬停放大等效果。"""
+    sprite = arrow_sprite(direction, size * scale, color)
+    if alpha < 255:
+        sprite = sprite.copy()
+        sprite.set_alpha(alpha)
+    surface.blit(sprite, sprite.get_rect(center=center))
+
+
+# ==================================================================== 按钮
 class Button:
     """一个矩形按钮：支持悬停、按下、禁用三种状态。"""
 
     def __init__(self, rect, label, on_click=None, *,
-                 style="normal", font_size=22, bold=True, radius=12):
+                 style="normal", font_size=22, bold=True, radius=14):
         self.rect = pygame.Rect(rect)
         self.label = label
         self.on_click = on_click
@@ -204,37 +380,43 @@ class Button:
 
     # -------------------------------------------------- 绘制
     def _palette(self):
+        """返回 (渐变上端, 渐变下端, 描边色, 文字色, 光晕色)。"""
         if self.style == "primary":
-            base = S.COLOR_ACCENT_DARK
-            border = S.COLOR_ACCENT
-            text = (255, 255, 255)
+            top, bottom = S.COLOR_BTN_PRIMARY_TOP, S.COLOR_BTN_PRIMARY_BOTTOM
+            border, text = S.COLOR_BTN_PRIMARY_BORDER, (255, 255, 255)
+            glow = S.COLOR_ACCENT
         elif self.style == "danger":
-            base = S.COLOR_DANGER_DARK
-            border = S.COLOR_DANGER
-            text = (255, 255, 255)
+            top, bottom = S.COLOR_BTN_DANGER_TOP, S.COLOR_BTN_DANGER_BOTTOM
+            border, text = S.COLOR_BTN_DANGER_BORDER, (255, 255, 255)
+            glow = S.COLOR_DANGER
         else:
-            base = S.COLOR_BTN_BG
-            border = S.COLOR_BTN_BORDER
-            text = S.COLOR_BTN_TEXT
-        if self.hovered and not self.pressed:
-            base = lighten(base, 0.22)
-            border = lighten(border, 0.25)
-        if self.pressed:
-            base = darken(base, 0.12)
-        return base, border, text
+            top, bottom = S.COLOR_BTN_TOP, S.COLOR_BTN_BOTTOM
+            border, text = S.COLOR_BTN_BORDER, S.COLOR_BTN_TEXT
+            glow = S.COLOR_ACCENT
+        return top, bottom, border, text, glow
 
     def draw(self, surface):
-        base, border, text_color = self._palette()
+        top, bottom, border, text_color, glow = self._palette()
         rect = self.rect.copy()
+
         if not self.enabled:
-            base = mix(base, S.COLOR_BG_BOTTOM, 0.55)
-            border = mix(border, S.COLOR_BG_BOTTOM, 0.55)
+            top = mix(top, S.COLOR_BG_BOTTOM, 0.60)
+            bottom = mix(bottom, S.COLOR_BG_BOTTOM, 0.60)
+            border = mix(border, S.COLOR_BG_BOTTOM, 0.60)
             text_color = S.COLOR_TEXT_FAINT
+            draw_shadow(surface, rect, radius=self.radius, spread=6, alpha=60, offset=(0, 2))
         else:
             if self.pressed:
                 rect.y += 2
+                top, bottom = darken(top, 0.12), darken(bottom, 0.12)
             elif self.hovered:
                 rect.y -= 1
-            draw_shadow(surface, rect, radius=self.radius, spread=8, alpha=80, offset=(0, 3))
-        draw_round_rect(surface, rect, base, self.radius, border, 2)
+                top, bottom = lighten(top, 0.16), lighten(bottom, 0.16)
+                border = lighten(border, 0.20)
+                draw_glow(surface, rect.center, int(rect.width * 0.62), glow, alpha=34, layers=22)
+            draw_shadow(surface, rect, radius=self.radius, spread=9, alpha=95, offset=(0, 4))
+
+        body = round_rect_surface(rect.size, self.radius, top, bottom,
+                                  border, 2, highlight=True)
+        surface.blit(body, rect.topleft)
         draw_text(surface, self.label, self.font_size, text_color, rect.center, bold=self.bold)

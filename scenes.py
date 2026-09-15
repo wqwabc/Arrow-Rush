@@ -15,17 +15,18 @@ import ui
 from game import DIRECTION_NAMES
 from ui import Button
 
+# 顶部信息栏做成一张浮起的卡片，而不是通栏色块
+TOP_BAR_CARD = pygame.Rect(20, 12, S.WINDOW_WIDTH - 40, 72)
 
-# ==================================================================== 背景
-def make_background(size):
-    """生成一次性渐变背景（只算一次，之后每帧直接 blit）。"""
-    width, height = size
-    surface = pygame.Surface(size)
-    for y in range(height):
-        t = y / max(1, height - 1)
-        pygame.draw.line(surface, ui.mix(S.COLOR_BG_TOP, S.COLOR_BG_BOTTOM, t),
-                         (0, y), (width, y))
-    return surface
+# 开始界面说明行的图标顺序
+RULE_DIRECTIONS = ("up", "down", "left", "right")
+
+RULE_LINES = (
+    "点击棋盘上的箭头，它会沿着自己的方向前进。",
+    "前方到棋盘边界没有其他箭头 → 箭头飞出棋盘并消失。",
+    "前方有其他箭头阻挡 → 无法消除，并消耗一次失误机会。",
+    "清空全部箭头进入下一关；失误次数耗尽则本关失败。",
+)
 
 
 # ==================================================================== 棋盘布局
@@ -48,7 +49,7 @@ def board_layout(rows, cols):
 
 
 def cell_rect(grid, cell, row, col):
-    """第 row 行第 col 列格子的矩形（用两次 round 保证格子之间无缝隙）。"""
+    """第 row 行第 col 列格子的矩形（用两次 round 保证相邻格子不重叠、不留缝）。"""
     left = round(grid.x + col * cell)
     top = round(grid.y + row * cell)
     right = round(grid.x + (col + 1) * cell)
@@ -67,6 +68,20 @@ def cell_at(pos, grid, cell, rows, cols):
     return None
 
 
+def draw_panel(surface, rect, radius=20, top_color=None, bottom_color=None,
+               border_color=None, border_width=2, shadow_alpha=100, shadow_offset=(0, 8)):
+    """画一张浮起的面板：阴影 + 渐变底 + 描边 + 顶部高光。"""
+    ui.draw_shadow(surface, rect, radius=radius, spread=max(10, radius // 2),
+                   alpha=shadow_alpha, offset=shadow_offset)
+    body = ui.round_rect_surface(
+        rect.size, radius,
+        S.COLOR_PANEL_TOP if top_color is None else top_color,
+        S.COLOR_PANEL_BOTTOM if bottom_color is None else bottom_color,
+        S.COLOR_PANEL_BORDER if border_color is None else border_color,
+        border_width, highlight=True)
+    surface.blit(body, rect.topleft)
+
+
 # ==================================================================== 开始界面
 class StartScene:
     def __init__(self, app):
@@ -74,9 +89,9 @@ class StartScene:
         self.time = 0.0
         cx = S.WINDOW_WIDTH // 2
         self.buttons = [
-            Button((cx - 140, 552, 280, 64), "开 始 游 戏", self.app.start_new_game,
-                   style="primary", font_size=26),
-            Button((cx - 90, 632, 180, 48), "退出游戏", self.app.quit, font_size=20),
+            Button((cx - 150, 556, 300, 66), "开 始 游 戏", self.app.start_new_game,
+                   style="primary", font_size=27),
+            Button((cx - 95, 640, 190, 50), "退出游戏", self.app.quit, font_size=20),
         ]
 
     def on_escape(self):
@@ -92,36 +107,43 @@ class StartScene:
     def draw(self, surface):
         cx = S.WINDOW_WIDTH // 2
 
-        # 顶部一排四个方向的装饰箭头，轻微上下浮动
-        for index, direction in enumerate(("up", "down", "left", "right")):
-            x = cx + (index - 1.5) * 96
-            bob = math.sin(self.time * 2.0 + index * 0.7) * 6
-            ui.draw_arrow(surface, (x, 126 + bob), 44, direction, S.ARROW_COLORS[direction])
+        # 标题背后的柔光
+        ui.draw_glow(surface, (cx, 240), 300, S.COLOR_ACCENT, alpha=34, layers=34)
 
-        ui.draw_text(surface, "一箭又一箭", 78, S.COLOR_TEXT, (cx, 230), bold=True)
-        ui.draw_text(surface, "Arrow Escape · Python 基础版", 22, S.COLOR_TEXT_DIM, (cx, 286))
+        # 四个方向的装饰箭头，错开相位上下浮动
+        for index, direction in enumerate(RULE_DIRECTIONS):
+            x = cx + (index - 1.5) * 110
+            bob = math.sin(self.time * 1.8 + index * 0.8) * 7
+            ui.draw_arrow(surface, (x, 120 + bob), 48, direction, S.ARROW_COLORS[direction])
+
+        ui.draw_text_gradient(surface, "一箭又一箭", 84,
+                              S.COLOR_TITLE_TOP, S.COLOR_TITLE_BOTTOM,
+                              (cx, 236), bold=True)
+        ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 296))
+        pygame.draw.line(surface, ui.mix(S.COLOR_ACCENT, S.COLOR_BG_BOTTOM, 0.62),
+                         (cx - 150, 318), (cx + 150, 318), 2)
 
         # 玩法说明面板
-        panel = pygame.Rect(0, 0, 700, 196)
-        panel.center = (cx, 404)
-        ui.draw_shadow(surface, panel, radius=18, spread=14, alpha=90, offset=(0, 6))
-        ui.draw_round_rect(surface, panel, S.COLOR_PANEL, 18, S.COLOR_PANEL_BORDER, 2)
-        ui.draw_text(surface, "玩 法 说 明", 21, S.COLOR_ACCENT,
-                     (panel.centerx, panel.y + 30), bold=True)
-        for index, line in enumerate((
-            "点击棋盘上的箭头，它会沿着自己的方向前进。",
-            "前方到棋盘边界没有其他箭头 → 箭头飞出棋盘并消失。",
-            "前方有其他箭头阻挡 → 无法消除，并消耗一次失误机会。",
-            "清空全部箭头进入下一关；失误次数耗尽则本关失败。",
-        )):
-            ui.draw_text(surface, line, 19, S.COLOR_TEXT_DIM,
-                         (panel.x + 36, panel.y + 70 + index * 31), anchor="midleft")
+        panel = pygame.Rect(0, 0, 740, 206)
+        panel.center = (cx, 433)
+        draw_panel(surface, panel)
+        ui.draw_round_rect(surface, pygame.Rect(panel.x + 22, panel.y + 34, 4, 24),
+                           S.COLOR_ACCENT, 2)
+        ui.draw_text(surface, "玩 法 说 明", 20, S.COLOR_ACCENT,
+                     (panel.x + 38, panel.y + 46), anchor="midleft", bold=True)
+
+        for index, line in enumerate(RULE_LINES):
+            y = panel.y + 90 + index * 30
+            direction = RULE_DIRECTIONS[index]
+            ui.draw_arrow(surface, (panel.x + 48, y), 13, direction,
+                          S.ARROW_COLORS[direction])
+            ui.draw_text(surface, line, 18, S.COLOR_TEXT_DIM,
+                         (panel.x + 70, y), anchor="midleft")
 
         for button in self.buttons:
             button.draw(surface)
 
-        ui.draw_text(surface, "按 Esc 退出游戏", 17, S.COLOR_TEXT_FAINT,
-                     (cx, S.WINDOW_HEIGHT - 22))
+        ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 730))
 
 
 # ==================================================================== 游戏界面
@@ -141,10 +163,12 @@ class GameScene:
         self.toast_color = S.COLOR_TEXT
         self.toast_timer = 0.0
 
-        right = S.WINDOW_WIDTH - 32
+        right = TOP_BAR_CARD.right - 20
         self.buttons = [
-            Button((right - 260, 26, 124, 44), "重新开始", self.restart_level, font_size=19),
-            Button((right - 124, 26, 124, 44), "返回菜单", self.back_to_menu, font_size=19),
+            Button((right - 260, TOP_BAR_CARD.y + 14, 124, 44), "重新开始",
+                   self.restart_level, font_size=19),
+            Button((right - 124, TOP_BAR_CARD.y + 14, 124, 44), "返回菜单",
+                   self.back_to_menu, font_size=19),
         ]
 
     # ---------------------------------------------------------- 对外动作
@@ -259,23 +283,26 @@ class GameScene:
     # -------------------------------------------------- 顶部信息栏
     def draw_top_bar(self, surface):
         state = self.state
-        bar = pygame.Rect(0, 0, S.WINDOW_WIDTH, S.TOP_BAR_HEIGHT)
-        pygame.draw.rect(surface, S.COLOR_TOP_BAR, bar)
-        pygame.draw.line(surface, S.COLOR_TOP_BAR_LINE,
-                         (0, bar.bottom - 1), (bar.right, bar.bottom - 1), 2)
+        card = TOP_BAR_CARD
+        draw_panel(surface, card, radius=20, top_color=S.COLOR_TOP_BAR_TOP,
+                   bottom_color=S.COLOR_TOP_BAR_BOTTOM, border_color=S.COLOR_TOP_BAR_LINE,
+                   shadow_alpha=105, shadow_offset=(0, 7))
 
+        # 关卡信息：左侧强调条 + 主标题 + 副标题
+        ui.draw_round_rect(surface, pygame.Rect(card.x + 20, card.centery - 21, 5, 42),
+                           S.COLOR_ACCENT, 2)
         ui.draw_text(surface, f"第 {state.level_index + 1} 关", 28, S.COLOR_TEXT,
-                     (32, 34), anchor="midleft", bold=True)
-        ui.draw_text(surface, f"共 {state.total_levels} 关 · {state.name}", 17,
-                     S.COLOR_TEXT_DIM, (32, 68), anchor="midleft")
+                     (card.x + 38, card.centery - 10), anchor="midleft", bold=True)
+        ui.draw_text(surface, f"共 {state.total_levels} 关 · {state.name}", 16,
+                     S.COLOR_TEXT_DIM, (card.x + 38, card.centery + 18), anchor="midleft")
 
-        self.draw_stat_chip(surface, (274, 20, 148, 56), "剩余箭头",
-                            str(state.arrows_left), S.COLOR_ACCENT)
         left = state.mistakes_left
-        color = (S.COLOR_SUCCESS if left > 1 else
-                 S.COLOR_WARN if left == 1 else S.COLOR_DANGER)
-        self.draw_stat_chip(surface, (438, 20, 148, 56), "剩余失误",
-                            f"{left} / {state.max_mistakes}", color)
+        mistake_color = (S.COLOR_SUCCESS if left > 1 else
+                         S.COLOR_WARN if left == 1 else S.COLOR_DANGER)
+        self.draw_stat_chip(surface, (296, card.y + 8, 146, 56), "剩余箭头",
+                            str(state.arrows_left), S.COLOR_ACCENT)
+        self.draw_stat_chip(surface, (452, card.y + 8, 146, 56), "剩余失误",
+                            f"{left} / {state.max_mistakes}", mistake_color)
 
         for button in self.buttons:
             button.draw(surface)
@@ -283,72 +310,109 @@ class GameScene:
     @staticmethod
     def draw_stat_chip(surface, rect, label, value, value_color):
         rect = pygame.Rect(rect)
-        ui.draw_round_rect(surface, rect, S.COLOR_CHIP_BG, 12, S.COLOR_CHIP_BORDER, 2)
-        ui.draw_text(surface, label, 15, S.COLOR_TEXT_FAINT, (rect.centerx, rect.y + 17))
-        ui.draw_text(surface, value, 25, value_color, (rect.centerx, rect.y + 39), bold=True)
+        surface.blit(ui.round_rect_surface(rect.size, 14, S.COLOR_CHIP_TOP,
+                                           S.COLOR_CHIP_BOTTOM, S.COLOR_CHIP_BORDER, 1,
+                                           highlight=True), rect.topleft)
+        ui.draw_round_rect(surface, pygame.Rect(rect.x + 13, rect.centery - 15, 4, 30),
+                           value_color, 2)
+        ui.draw_text(surface, label, 14, S.COLOR_TEXT_FAINT,
+                     (rect.x + 27, rect.y + 18), anchor="midleft")
+        ui.draw_text(surface, value, 25, value_color,
+                     (rect.x + 27, rect.y + 39), anchor="midleft", bold=True)
 
     # -------------------------------------------------- 棋盘
     def draw_board(self, surface):
         state = self.state
         panel, grid, cell = self.layout()
-        radius = max(4, int(cell * 0.16))
+        tile_px = int(round(cell)) - S.CELL_GAP
+        tile_radius = max(6, int(tile_px * 0.20))
 
-        ui.draw_shadow(surface, panel, radius=20, spread=16, alpha=100, offset=(0, 8))
-        ui.draw_round_rect(surface, panel, S.COLOR_BOARD_BG, 20, S.COLOR_BOARD_BORDER, 3)
+        ui.draw_shadow(surface, panel, radius=26, spread=22, alpha=115, offset=(0, 12))
+        surface.blit(ui.round_rect_surface(panel.size, 26, S.COLOR_BOARD_TOP,
+                                           S.COLOR_BOARD_BOTTOM, S.COLOR_BOARD_BORDER, 2,
+                                           highlight=True), panel.topleft)
 
-        # 1) 底板格子
+        # 内凹的格子井，让格子看起来是嵌在棋盘里的
+        well = grid.inflate(14, 14)
+        surface.blit(ui.round_rect_surface(well.size, 18, S.COLOR_BOARD_WELL_TOP,
+                                           S.COLOR_BOARD_WELL_BOTTOM,
+                                           S.COLOR_BOARD_WELL_EDGE, 1, recess=True),
+                     well.topleft)
+
+        tile = ui.round_rect_surface((tile_px, tile_px), tile_radius, S.COLOR_TILE_TOP,
+                                     S.COLOR_TILE_BOTTOM, S.COLOR_TILE_EDGE, 1,
+                                     highlight=True, shade=True)
+        tile_hover = ui.round_rect_surface((tile_px, tile_px), tile_radius,
+                                           S.COLOR_TILE_HOVER_TOP, S.COLOR_TILE_HOVER_BOTTOM,
+                                           S.COLOR_ACCENT, 2,
+                                           highlight=True, shade=True)
+
         for row in range(state.rows):
             for col in range(state.cols):
-                rect = cell_rect(grid, cell, row, col).inflate(-S.CELL_GAP, -S.CELL_GAP)
-                base = S.COLOR_CELL_BG if (row + col) % 2 == 0 else S.COLOR_CELL_BG_ALT
-                if self.hover_cell == (row, col):
-                    base = ui.lighten(base, 0.18)
-                ui.draw_round_rect(surface, rect, base, radius)
-                if self.hover_cell == (row, col):
-                    pygame.draw.rect(surface, S.COLOR_ACCENT, rect,
-                                     width=3, border_radius=radius)
+                center = cell_rect(grid, cell, row, col).center
+                hovered = self.hover_cell == (row, col)
+                if hovered:
+                    ui.draw_glow(surface, center, int(tile_px * 0.95), S.COLOR_ACCENT,
+                                 alpha=40, layers=22)
+                surface.blit(tile_hover if hovered else tile, tile.get_rect(center=center))
 
-        # 2) 箭头
         for (row, col), direction in state.arrows.items():
-            ui.draw_arrow(surface, cell_rect(grid, cell, row, col).center,
-                          cell * S.ARROW_SCALE, direction, S.ARROW_COLORS[direction])
+            center = cell_rect(grid, cell, row, col).center
+            hovered = self.hover_cell == (row, col)
+            ui.draw_arrow(surface, center, cell * S.ARROW_SCALE, direction,
+                          S.ARROW_COLORS[direction], scale=1.06 if hovered else 1.0)
 
-        # 3) 选中脉冲
-        if self.selected is not None and self.select_timer > 0:
-            rect = cell_rect(grid, cell, *self.selected).inflate(-S.CELL_GAP, -S.CELL_GAP)
-            t = 1.0 - self.select_timer / 0.5          # 0 → 1
-            grow = int(2 + t * 14)
-            ring = pygame.Surface((rect.width + grow * 2, rect.height + grow * 2),
-                                  pygame.SRCALPHA)
-            pygame.draw.rect(ring, (*S.COLOR_ACCENT, int(220 * (1 - t))),
-                             ring.get_rect(), width=4, border_radius=radius + grow)
-            surface.blit(ring, (rect.x - grow, rect.y - grow))
+        self.draw_selection(surface, grid, cell, tile_px, tile_radius)
+
+    def draw_selection(self, surface, grid, cell, tile_px, tile_radius):
+        """点中箭头后扩散一圈同色光环。"""
+        if self.selected is None or self.select_timer <= 0:
+            return
+        direction = self.state.arrow_at(*self.selected)
+        color = S.ARROW_COLORS.get(direction, S.COLOR_ACCENT)
+        center = cell_rect(grid, cell, *self.selected).center
+        t = 1.0 - self.select_timer / 0.5           # 0 → 1
+        grow = int(4 + t * 18)
+        ring = pygame.Surface((tile_px + grow * 2, tile_px + grow * 2), pygame.SRCALPHA)
+        pygame.draw.rect(ring, (*color, int(215 * (1 - t))), ring.get_rect(),
+                         width=3, border_radius=tile_radius + grow)
+        surface.blit(ring, ring.get_rect(center=center))
 
     # -------------------------------------------------- 底部提示栏
     def draw_bottom_bar(self, surface):
+        line_y = S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT
+        pygame.draw.line(surface, S.COLOR_TOP_BAR_LINE,
+                         (60, line_y), (S.WINDOW_WIDTH - 60, line_y), 1)
+
         # toast 和提示文字占同一行，两者同时画会互相压字，所以 toast 显示时让位
         if self.toast_timer <= 0:
-            ui.draw_text(surface, "点击箭头：前方无阻挡 → 飞出棋盘；有阻挡 → 消耗 1 次失误",
-                         18, S.COLOR_TEXT_DIM,
-                         (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - 46))
+            text = "点击箭头：前方无阻挡 → 飞出棋盘；有阻挡 → 消耗 1 次失误"
+            width = ui.text_width(text, 18) + 46
+            pill = pygame.Rect(0, 0, width, 38)
+            pill.center = (S.WINDOW_WIDTH // 2, line_y + 24)
+            surface.blit(ui.round_rect_surface(pill.size, 19, S.COLOR_CHIP_TOP,
+                                               S.COLOR_CHIP_BOTTOM, S.COLOR_CHIP_BORDER, 1),
+                         pill.topleft)
+            ui.draw_text(surface, text, 18, S.COLOR_TEXT_DIM, pill.center)
+
         if S.DEV_PREVIEW:
             ui.draw_text(surface,
                          "【界面阶段】点击箭头目前只做选中反馈，消除 / 碰撞判定待接入 · "
                          "F1 预览通关 · F2 预览失败",
-                         15, S.COLOR_WARN, (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - 20))
+                         15, S.COLOR_WARN, (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - 18))
 
     def draw_toast(self, surface):
         if self.toast_timer <= 0 or not self.toast_text:
             return
         alpha = int(255 * min(1.0, self.toast_timer / 0.4))
-        image = ui.font(20, bold=True).render(self.toast_text, True, self.toast_color)
-        pill = image.get_rect().inflate(40, 20)
-        pill.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - 46)
+        image = ui.font(19, bold=True).render(self.toast_text, True, self.toast_color)
+        pill = image.get_rect().inflate(48, 22)
+        pill.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT + 24)
 
         layer = pygame.Surface(pill.size, pygame.SRCALPHA)
-        pygame.draw.rect(layer, (*S.COLOR_BOARD_BG, min(235, alpha)),
+        pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
                          layer.get_rect(), border_radius=pill.height // 2)
-        pygame.draw.rect(layer, (*S.COLOR_ACCENT, alpha), layer.get_rect(),
+        pygame.draw.rect(layer, (*self.toast_color, int(alpha * 0.75)), layer.get_rect(),
                          width=2, border_radius=pill.height // 2)
         image.set_alpha(alpha)
         layer.blit(image, image.get_rect(center=(pill.width // 2, pill.height // 2)))
@@ -357,8 +421,8 @@ class GameScene:
     # -------------------------------------------------- 结算浮层
     @staticmethod
     def overlay_panel_rect():
-        panel = pygame.Rect(0, 0, 500, 336)
-        panel.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT // 2 - 6)
+        panel = pygame.Rect(0, 0, 520, 368)
+        panel.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT // 2 - 8)
         return panel
 
     def build_overlay_buttons(self, kind):
@@ -372,15 +436,15 @@ class GameScene:
                 entries = [("再玩一遍", self.replay_all, "primary"),
                            ("重玩本关", self.restart_level, "normal"),
                            ("返回菜单", self.back_to_menu, "normal")]
-            width, gap = 140, 16
+            width, gap = 146, 16
         else:
             entries = [("再试一次", self.restart_level, "primary"),
                        ("返回菜单", self.back_to_menu, "normal")]
-            width, gap = 160, 18
+            width, gap = 168, 18
 
         total = len(entries) * width + (len(entries) - 1) * gap
         x = panel.centerx - total // 2
-        y = panel.bottom - 84
+        y = panel.bottom - 76
         buttons = []
         for label, callback, style in entries:
             buttons.append(Button((x, y, width, 50), label, callback,
@@ -388,9 +452,34 @@ class GameScene:
             x += width + gap
         return buttons
 
+    @staticmethod
+    def draw_result_badge(surface, center, radius, color, kind):
+        """结算面板顶部的圆形徽章：通关画对勾，失败画叉。"""
+        ui.draw_glow(surface, center, int(radius * 2.0), color, alpha=70, layers=26)
+        pygame.draw.circle(surface, darken_soft(color, 0.78), center, radius)
+        pygame.draw.circle(surface, color, center, radius, width=3)
+        width = max(4, int(radius * 0.17))
+        cx, cy = center
+        if kind == "win":
+            points = [(cx - radius * 0.42, cy + radius * 0.02),
+                      (cx - radius * 0.13, cy + radius * 0.32),
+                      (cx + radius * 0.44, cy - radius * 0.34)]
+            pygame.draw.lines(surface, color, False, points, width)
+            for point in points:
+                pygame.draw.circle(surface, color, point, width // 2)
+        else:
+            offset = radius * 0.36
+            for dx, dy in ((-1, -1), (-1, 1)):
+                start = (cx + dx * offset, cy + dy * offset)
+                end = (cx - dx * offset, cy - dy * offset)
+                pygame.draw.line(surface, color, start, end, width)
+                pygame.draw.circle(surface, color, start, width // 2)
+                pygame.draw.circle(surface, color, end, width // 2)
+
     def draw_overlay(self, surface):
         win = self.overlay == "win"
         state = self.state
+        accent = S.COLOR_SUCCESS if win else S.COLOR_DANGER
 
         dim = pygame.Surface((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
         dim.set_alpha(S.COLOR_OVERLAY[3])
@@ -398,12 +487,16 @@ class GameScene:
         surface.blit(dim, (0, 0))
 
         panel = self.overlay_panel_rect()
-        border = S.COLOR_SUCCESS if win else S.COLOR_DANGER
-        ui.draw_shadow(surface, panel, radius=22, spread=20, alpha=120, offset=(0, 10))
-        ui.draw_round_rect(surface, panel, S.COLOR_BOARD_BG, 22, border, 3)
+        ui.draw_glow(surface, panel.center, 340, accent, alpha=42, layers=32)
+        draw_panel(surface, panel, radius=24, border_color=accent, border_width=2,
+                   shadow_alpha=130, shadow_offset=(0, 12))
 
-        ui.draw_text(surface, "通 关 ！" if win else "闯 关 失 败", 48, border,
-                     (panel.centerx, panel.y + 78), bold=True)
+        self.draw_result_badge(surface, (panel.centerx, panel.y + 74), 34, accent,
+                               "win" if win else "lose")
+
+        ui.draw_text_gradient(surface, "通 关 ！" if win else "闯 关 失 败", 46,
+                              S.COLOR_TITLE_TOP, accent,
+                              (panel.centerx, panel.y + 148), bold=True)
 
         if win:
             detail = (f"第 {state.level_index + 1} 关「{state.name}」已完成 · "
@@ -413,8 +506,13 @@ class GameScene:
             detail = f"失误次数已耗尽（共 {state.max_mistakes} 次）"
             note = "再试一次，注意箭头的方向"
 
-        ui.draw_text(surface, detail, 19, S.COLOR_TEXT_DIM, (panel.centerx, panel.y + 140))
-        ui.draw_text(surface, note, 18, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 178))
+        ui.draw_text(surface, detail, 19, S.COLOR_TEXT_DIM, (panel.centerx, panel.y + 198))
+        ui.draw_text(surface, note, 17, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 230))
 
         for button in self.overlay_buttons:
             button.draw(surface)
+
+
+def darken_soft(color, amount):
+    """ui.darken 的薄封装，让徽章底色不至于全黑。"""
+    return ui.mix(color, (10, 12, 20), amount)
