@@ -183,6 +183,15 @@ class GameState:
         """把一个箭头移出棋盘。"""
         return self.arrows.pop((row, col), None)
 
+    def restore(self, cell, direction):
+        """把箭头放回棋盘（撤销用）。"""
+        self.arrows[cell] = direction
+
+    def refund_mistake(self):
+        """退回一次失误（撤销用）。"""
+        self.mistakes = max(0, self.mistakes - 1)
+        return self.mistakes
+
     def add_mistake(self):
         """记一次失误，返回记完之后的失误总数。"""
         self.mistakes += 1
