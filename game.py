@@ -21,6 +21,26 @@ DIRECTION_VECTORS = {
 }
 
 
+def _blocker_on(board, rows, cols, cell):
+    """在给定的棋盘上，沿箭头方向找第一个挡住它的箭头。
+
+    注意必须按"当前棋盘"逐格往前找。写成"先在满棋盘上找到第一个阻挡者、
+    再看它是否还在盘上"是错的——万一那个已经被消掉了，后面的第二个阻挡者
+    就被漏掉了，会误判成可以飞出。
+    """
+    direction = board.get(cell)
+    if direction is None:
+        return None
+    dr, dc = DIRECTION_VECTORS[direction]
+    r, c = cell[0] + dr, cell[1] + dc
+    while 0 <= r < rows and 0 <= c < cols:
+        if (r, c) in board:
+            return (r, c)
+        r += dr
+        c += dc
+    return None
+
+
 class GameState:
     def __init__(self, level_index=0):
         self.level_index = 0
@@ -109,21 +129,36 @@ class GameState:
     # ---------------------------------------------------------- 路径检测
     def blocker_at(self, row, col):
         """沿箭头方向逐格前进，返回第一个挡住它的箭头位置；一路通到边界则返回 None。"""
-        direction = self.arrows.get((row, col))
-        if direction is None:
-            return None
-        dr, dc = DIRECTION_VECTORS[direction]
-        r, c = row + dr, col + dc
-        while 0 <= r < self.rows and 0 <= c < self.cols:
-            if (r, c) in self.arrows:
-                return (r, c)
-            r += dr
-            c += dc
-        return None
+        return _blocker_on(self.arrows, self.rows, self.cols, (row, col))
 
     def can_leave(self, row, col):
         """前方到棋盘边界之间没有其他箭头，该箭头就能飞出棋盘并消除。"""
         return (row, col) in self.arrows and self.blocker_at(row, col) is None
+
+    def free_arrows(self, board=None):
+        """当前所有能直接飞出棋盘的箭头。"""
+        board = self.arrows if board is None else board
+        return [cell for cell in board
+                if _blocker_on(board, self.rows, self.cols, cell) is None]
+
+    def hint(self):
+        """挑一个当前可以消掉的箭头作为提示；没有可消的则返回 None。
+
+        这个游戏不存在"点错就死"——箭头能飞出的性质是单调的：消掉别的箭头只会
+        让路径更空，所以此刻能飞出的箭头以后一定还能飞出。因此随便挑一个都安全。
+        这里优先挑"消掉之后能让最多同伴变成可飞出"的那个，提示更有用一些。
+        """
+        free = self.free_arrows()
+        if not free:
+            return None
+        best, best_gain = free[0], -1
+        for cell in free:
+            trial = dict(self.arrows)
+            del trial[cell]
+            gain = len(self.free_arrows(trial))
+            if gain > best_gain:
+                best, best_gain = cell, gain
+        return best
 
     def steps_to_edge(self, row, col):
         """箭头中心走到棋盘外沿所需的格数（不含自身所在格）。"""

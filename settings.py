@@ -118,3 +118,10 @@ SCORE_TARGET_PER_ARROW = 4.5     # 目标用时 = 箭头数 × 这个系数（�
 SCORE_PER_SPARE_MISTAKE = 80     # 每剩余一次失误加多少分
 
 COLOR_TIME = (170, 162, 250)     # 用时胶囊的强调色
+
+# ------------------------------------------------------------------ 提示
+HINTS_PER_LEVEL = 3              # 每关可用提示次数
+SCORE_HINT_PENALTY = 150         # 每用一次提示扣多少分
+HINT_SECONDS = 10.0              # 提示高亮持续多久
+
+COLOR_HINT = (255, 212, 96)      # 提示的金色

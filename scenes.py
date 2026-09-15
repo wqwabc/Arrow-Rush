@@ -28,14 +28,18 @@ SELECT_COLUMNS = 4
 SELECT_GAP = 20
 SELECT_TOP = 172
 
-# 开始界面说明行的图标顺序
-RULE_DIRECTIONS = ("up", "down", "left", "right")
+# 开始界面顶端那排装饰箭头
+DECOR_DIRECTIONS = ("up", "down", "left", "right")
+
+# 玩法说明每行前面那个小箭头的方向（行数比方向数多，循环取用即可）
+RULE_DIRECTIONS = ("up", "down", "left", "right", "up")
 
 RULE_LINES = (
     "点击棋盘上的箭头，它会沿着自己的方向前进。",
     "前方到棋盘边界没有其他箭头 → 箭头飞出棋盘并消失。",
     "前方有其他箭头阻挡 → 无法消除，并消耗一次失误机会。",
-    "清空全部箭头进入下一关；失误次数耗尽则本关失败。",
+    "清空全部箭头即可通关；失误次数耗尽则本关失败。",
+    "卡住了就点右下角「提示」，会用金框标出一个现在能消掉的箭头。",
 )
 
 
@@ -148,21 +152,21 @@ class StartScene:
         ui.draw_glow(surface, (cx, 240), 300, S.COLOR_ACCENT, alpha=34, layers=34)
 
         # 四个方向的装饰箭头，错开相位上下浮动
-        for index, direction in enumerate(RULE_DIRECTIONS):
+        for index, direction in enumerate(DECOR_DIRECTIONS):
             x = cx + (index - 1.5) * 110
             bob = math.sin(self.time * 1.8 + index * 0.8) * 7
             ui.draw_arrow(surface, (x, 120 + bob), 48, direction, S.ARROW_COLORS[direction])
 
         ui.draw_text_gradient(surface, "一箭又一箭", 84,
                               S.COLOR_TITLE_TOP, S.COLOR_TITLE_BOTTOM,
-                              (cx, 236), bold=True)
-        ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 296))
+                              (cx, 216), bold=True)
+        ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 276))
         pygame.draw.line(surface, ui.mix(S.COLOR_ACCENT, S.COLOR_BG_BOTTOM, 0.62),
-                         (cx - 150, 310), (cx + 150, 310), 2)
+                         (cx - 150, 288), (cx + 150, 288), 2)
 
         # 玩法说明面板
-        panel = pygame.Rect(0, 0, 740, 206)
-        panel.center = (cx, 424)
+        panel = pygame.Rect(0, 0, 740, 236)
+        panel.center = (cx, 410)
         draw_panel(surface, panel)
         ui.draw_round_rect(surface, pygame.Rect(panel.x + 22, panel.y + 34, 4, 24),
                            S.COLOR_ACCENT, 2)
@@ -208,6 +212,10 @@ class GameScene:
 
         self.result = None               # 本关结算数据（得分明细等）
 
+        self.hints_left = S.HINTS_PER_LEVEL
+        self.hint_cell = None            # 被提示标出的格子
+        self.hint_timer = 0.0
+
         right = TOP_BAR_CARD.right - 20
         self.buttons = [
             Button((right - 260, TOP_BAR_CARD.y + 14, 124, 44), "重新开始",
@@ -215,6 +223,10 @@ class GameScene:
             Button((right - 124, TOP_BAR_CARD.y + 14, 124, 44), "选择关卡",
                    self.goto_select, font_size=19),
         ]
+        self.hint_button = Button(
+            (S.WINDOW_WIDTH - 40 - 132, S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT + 14,
+             132, 44), "提示", self.use_hint, font_size=19)
+        self.refresh_hint_button()
 
     # ---------------------------------------------------------- 对外动作
     @property
@@ -254,6 +266,29 @@ class GameScene:
         self.hover_cell = None
         self.toast_timer = 0.0
         self.result = None
+        self.hints_left = S.HINTS_PER_LEVEL
+        self.hint_cell = None
+        self.hint_timer = 0.0
+        self.refresh_hint_button()
+
+    def refresh_hint_button(self):
+        self.hint_button.label = f"提示 ×{self.hints_left}"
+        self.hint_button.enabled = self.hints_left > 0
+
+    def use_hint(self):
+        """标出一个当前能直接消掉的箭头，供玩家参考。"""
+        if self.overlay or self.hints_left <= 0:
+            return
+        cell = self.state.hint()
+        if cell is None:
+            return
+        self.hints_left -= 1
+        self.hint_cell = cell
+        self.hint_timer = S.HINT_SECONDS
+        self.refresh_hint_button()
+        left = self.hints_left
+        tail = f"（还剩 {left} 次）" if left else "（提示已用完）"
+        self.show_toast(f"试试金框标出的箭头 {tail}", S.COLOR_HINT, 2.2)
 
     def open_overlay(self, kind):
         self.overlay = kind
@@ -277,6 +312,7 @@ class GameScene:
 
         for button in self.buttons:
             button.handle_event(event)
+        self.hint_button.handle_event(event)
 
         if event.type == pygame.MOUSEMOTION:
             self.update_hover(event.pos)
@@ -321,6 +357,9 @@ class GameScene:
         self.animations.append(FlyOut(cell, direction, distance, color))
         self.hit_cell = None
         self.hit_timer = 0.0
+        if cell == self.hint_cell:               # 提示的箭头已经消掉了，撤掉高亮
+            self.hint_cell = None
+            self.hint_timer = 0.0
 
     def block(self, cell, direction):
         """前方有阻挡：消耗一次失误，箭头前冲回弹 + 闪白 + 文字提示。"""
@@ -343,6 +382,10 @@ class GameScene:
                 self.animations.remove(anim)
         if self.hit_timer > 0:
             self.hit_timer = max(0.0, self.hit_timer - dt)
+        if self.hint_timer > 0:
+            self.hint_timer = max(0.0, self.hint_timer - dt)
+            if self.hint_timer == 0.0:
+                self.hint_cell = None
         if self.toast_timer > 0:
             self.toast_timer = max(0.0, self.toast_timer - dt)
         self.settle_if_finished()
@@ -360,15 +403,19 @@ class GameScene:
         """停表、算分、写成绩，然后弹出结算面板。"""
         state = self.state
         seconds = state.stop_clock()
+        hints_used = S.HINTS_PER_LEVEL - self.hints_left
         if win:
-            total, parts = score.breakdown(state.level, seconds, state.mistakes_left)
+            total, parts = score.breakdown(state.level, seconds,
+                                           state.mistakes_left, hints_used)
             better_score, better_time = self.app.progress.record(
                 state.level_index, total, seconds)
             self.result = {"score": total, "parts": parts, "seconds": seconds,
+                           "hints_used": hints_used,
                            "better_score": better_score, "better_time": better_time}
             self.open_overlay("win")
         else:
             self.result = {"score": 0, "parts": [], "seconds": seconds,
+                           "hints_used": hints_used,
                            "better_score": False, "better_time": False}
             self.open_overlay("lose")
 
@@ -482,6 +529,21 @@ class GameScene:
                 self.draw_flight(surface, grid, cell, anim)
 
         self.draw_hit_ring(surface, grid, cell, tile_px, tile_radius)
+        self.draw_hint(surface, grid, cell, tile_px, tile_radius)
+
+    def draw_hint(self, surface, grid, cell, tile_px, tile_radius):
+        """提示：金色脉冲光环，呼吸式明暗，比选中环更醒目。"""
+        if self.hint_cell is None or self.hint_timer <= 0:
+            return
+        center = cell_rect(grid, cell, *self.hint_cell).center
+        pulse = 0.5 + 0.5 * math.sin(self.time * 6.0)
+        ui.draw_glow(surface, center, int(tile_px * 1.15), S.COLOR_HINT,
+                     alpha=int(46 + 46 * pulse), layers=22)
+        grow = int(3 + 6 * pulse)
+        ring = pygame.Surface((tile_px + grow * 2, tile_px + grow * 2), pygame.SRCALPHA)
+        pygame.draw.rect(ring, (*S.COLOR_HINT, 235), ring.get_rect(),
+                         width=4, border_radius=tile_radius + grow)
+        surface.blit(ring, ring.get_rect(center=center))
 
     def arrow_pose(self, row, col, direction, busy):
         """算出某个箭头的 (位移格数, 颜色, 缩放)：碰撞时前冲、闪白、略微放大。"""
@@ -541,6 +603,8 @@ class GameScene:
                                                S.COLOR_CHIP_BOTTOM, S.COLOR_CHIP_BORDER, 1),
                          pill.topleft)
             ui.draw_text(surface, text, 18, S.COLOR_TEXT_DIM, pill.center)
+
+        self.hint_button.draw(surface)
 
     def draw_toast(self, surface):
         if self.toast_timer <= 0 or not self.toast_text:
@@ -673,9 +737,7 @@ class GameScene:
                                   (panel.centerx, panel.y + 256), bold=True)
             parts = result["parts"]
             if parts:
-                ui.draw_text(surface,
-                             "   +   ".join(f"{name} {score.format_score(value)}"
-                                            for name, value in parts),
+                ui.draw_text(surface, score.format_parts(parts),
                              14, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 292))
             note, note_color = self.record_note(result)
             ui.draw_text(surface, note, 15, note_color, (panel.centerx, panel.y + 320))
