@@ -28,6 +28,8 @@ class GameState:
         self.initial_arrows = {}
         self.arrows = {}
         self.mistakes = 0
+        self.elapsed = 0.0          # 本关已用时（秒）
+        self.final_time = None      # 本关结束时的用时；None 表示还在计时
         self.load_level(level_index)
 
     # ---------------------------------------------------------- 关卡装载
@@ -43,6 +45,25 @@ class GameState:
         """把当前关卡恢复到初始状态（"重新开始"和"重玩本关"都走这里）。"""
         self.arrows = dict(self.initial_arrows)
         self.mistakes = 0
+        self.elapsed = 0.0
+        self.final_time = None
+
+    # ---------------------------------------------------------- 计时
+    def tick(self, dt):
+        """累加用时；本关一旦结束就停表。"""
+        if self.final_time is None:
+            self.elapsed += dt
+
+    def stop_clock(self):
+        """停表并返回最终用时。重复调用返回同一个值。"""
+        if self.final_time is None:
+            self.final_time = self.elapsed
+        return self.final_time
+
+    @property
+    def seconds(self):
+        """界面上应该显示的用时：已结束就是最终用时，否则是当前用时。"""
+        return self.final_time if self.final_time is not None else self.elapsed
 
     # ---------------------------------------------------------- 查询
     @property

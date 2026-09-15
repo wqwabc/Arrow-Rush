@@ -11,6 +11,7 @@ import math
 import pygame
 
 import settings as S
+import score
 import ui
 from effects import Bounce, FlyOut
 from game import DIRECTION_NAMES, DIRECTION_VECTORS
@@ -179,6 +180,11 @@ class StartScene:
         for button in self.buttons:
             button.draw(surface)
 
+        progress = self.app.progress
+        ui.draw_text(surface,
+                     f"已通关 {progress.cleared_count} / {len(LEVELS)} 关 · "
+                     f"总分 {score.format_score(progress.total_score)}",
+                     16, S.COLOR_TEXT_DIM, (cx, 690))
         ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 722))
 
 
@@ -199,6 +205,8 @@ class GameScene:
         self.toast_text = ""
         self.toast_color = S.COLOR_TEXT
         self.toast_timer = 0.0
+
+        self.result = None               # 本关结算数据（得分明细等）
 
         right = TOP_BAR_CARD.right - 20
         self.buttons = [
@@ -245,6 +253,7 @@ class GameScene:
         self.hit_timer = 0.0
         self.hover_cell = None
         self.toast_timer = 0.0
+        self.result = None
 
     def open_overlay(self, kind):
         self.overlay = kind
@@ -328,6 +337,7 @@ class GameScene:
 
     def update(self, dt):
         self.time += dt
+        self.state.tick(dt)
         for anim in list(self.animations):
             if anim.update(dt):
                 self.animations.remove(anim)
@@ -342,9 +352,24 @@ class GameScene:
         if self.overlay or self.animations:
             return
         if not self.state.arrows:
-            self.app.progress.mark_cleared(self.state.level_index)
-            self.open_overlay("win")
+            self.finish_level(win=True)
         elif self.state.lost:
+            self.finish_level(win=False)
+
+    def finish_level(self, win):
+        """停表、算分、写成绩，然后弹出结算面板。"""
+        state = self.state
+        seconds = state.stop_clock()
+        if win:
+            total, parts = score.breakdown(state.level, seconds, state.mistakes_left)
+            better_score, better_time = self.app.progress.record(
+                state.level_index, total, seconds)
+            self.result = {"score": total, "parts": parts, "seconds": seconds,
+                           "better_score": better_score, "better_time": better_time}
+            self.open_overlay("win")
+        else:
+            self.result = {"score": 0, "parts": [], "seconds": seconds,
+                           "better_score": False, "better_time": False}
             self.open_overlay("lose")
 
     # ---------------------------------------------------------- 绘制
@@ -378,10 +403,17 @@ class GameScene:
         left = state.mistakes_left
         mistake_color = (S.COLOR_SUCCESS if left > 1 else
                          S.COLOR_WARN if left == 1 else S.COLOR_DANGER)
-        self.draw_stat_chip(surface, (296, card.y + 8, 146, 56), "剩余箭头",
-                            str(state.arrows_left), S.COLOR_ACCENT)
-        self.draw_stat_chip(surface, (452, card.y + 8, 146, 56), "剩余失误",
-                            f"{left} / {state.max_mistakes}", mistake_color)
+        # 超过目标用时就没有速度奖励了，胶囊换成橙色提示一下
+        target = score.target_seconds(state.level)
+        time_color = S.COLOR_WARN if state.seconds > target else S.COLOR_TIME
+        chips = (
+            ("剩余箭头", str(state.arrows_left), S.COLOR_ACCENT),
+            ("剩余失误", f"{left} / {state.max_mistakes}", mistake_color),
+            ("用时", score.format_clock(state.seconds), time_color),
+        )
+        for offset, (label, value, color) in enumerate(chips):
+            self.draw_stat_chip(surface, (212 + offset * 136, card.y + 8, 124, 56),
+                                label, value, color)
 
         for button in self.buttons:
             button.draw(surface)
@@ -392,12 +424,12 @@ class GameScene:
         surface.blit(ui.round_rect_surface(rect.size, 14, S.COLOR_CHIP_TOP,
                                            S.COLOR_CHIP_BOTTOM, S.COLOR_CHIP_BORDER, 1,
                                            highlight=True), rect.topleft)
-        ui.draw_round_rect(surface, pygame.Rect(rect.x + 13, rect.centery - 15, 4, 30),
+        ui.draw_round_rect(surface, pygame.Rect(rect.x + 12, rect.centery - 15, 4, 30),
                            value_color, 2)
-        ui.draw_text(surface, label, 14, S.COLOR_TEXT_FAINT,
-                     (rect.x + 27, rect.y + 18), anchor="midleft")
-        ui.draw_text(surface, value, 25, value_color,
-                     (rect.x + 27, rect.y + 39), anchor="midleft", bold=True)
+        ui.draw_text(surface, label, 13, S.COLOR_TEXT_FAINT,
+                     (rect.x + 24, rect.y + 18), anchor="midleft")
+        ui.draw_text(surface, value, 23, value_color,
+                     (rect.x + 24, rect.y + 39), anchor="midleft", bold=True)
 
     # -------------------------------------------------- 棋盘
     def draw_board(self, surface):
@@ -531,8 +563,8 @@ class GameScene:
     # -------------------------------------------------- 结算浮层
     @staticmethod
     def overlay_panel_rect():
-        panel = pygame.Rect(0, 0, 520, 368)
-        panel.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT // 2 - 8)
+        panel = pygame.Rect(0, 0, 560, 424)
+        panel.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT // 2 - 10)
         return panel
 
     def build_overlay_buttons(self, kind):
@@ -546,15 +578,15 @@ class GameScene:
                 entries = [("再玩一遍", self.replay_all, "primary"),
                            ("重玩本关", self.restart_level, "normal"),
                            ("选择关卡", self.goto_select, "normal")]
-            width, gap = 146, 16
+            width, gap = 150, 16
         else:
             entries = [("再试一次", self.restart_level, "primary"),
                        ("选择关卡", self.goto_select, "normal")]
-            width, gap = 168, 18
+            width, gap = 172, 18
 
         total = len(entries) * width + (len(entries) - 1) * gap
         x = panel.centerx - total // 2
-        y = panel.bottom - 76
+        y = panel.bottom - 74
         buttons = []
         for label, callback, style in entries:
             buttons.append(Button((x, y, width, 50), label, callback,
@@ -586,9 +618,26 @@ class GameScene:
                 pygame.draw.circle(surface, color, start, width // 2)
                 pygame.draw.circle(surface, color, end, width // 2)
 
+    def record_note(self, result):
+        """结算面板最下面那行：破纪录就报喜，否则显示历史最好成绩。"""
+        progress = self.app.progress
+        index = self.state.level_index
+        if result["better_score"] and result["better_time"]:
+            return "新纪录！最高分和最快用时都刷新了", S.COLOR_SUCCESS
+        if result["better_score"]:
+            return "刷新最高分纪录！", S.COLOR_SUCCESS
+        if result["better_time"]:
+            return "刷新最快用时纪录！", S.COLOR_SUCCESS
+        best = progress.best_seconds(index)
+        best_score = score.format_score(progress.best_score(index))
+        best_time = score.format_clock(best) if best is not None else "--:--"
+        return f"最高分 {best_score} · 最快 {best_time}", S.COLOR_TEXT_FAINT
+
     def draw_overlay(self, surface):
         win = self.overlay == "win"
         state = self.state
+        result = self.result or {"score": 0, "parts": [], "seconds": state.seconds,
+                                 "better_score": False, "better_time": False}
         accent = S.COLOR_SUCCESS if win else S.COLOR_DANGER
 
         dim = pygame.Surface((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
@@ -597,27 +646,42 @@ class GameScene:
         surface.blit(dim, (0, 0))
 
         panel = self.overlay_panel_rect()
-        ui.draw_glow(surface, panel.center, 340, accent, alpha=42, layers=32)
+        ui.draw_glow(surface, panel.center, 350, accent, alpha=42, layers=32)
         draw_panel(surface, panel, radius=24, border_color=accent, border_width=2,
                    shadow_alpha=130, shadow_offset=(0, 12))
 
-        self.draw_result_badge(surface, (panel.centerx, panel.y + 74), 34, accent,
+        self.draw_result_badge(surface, (panel.centerx, panel.y + 70), 32, accent,
                                "win" if win else "lose")
 
-        ui.draw_text_gradient(surface, "通 关 ！" if win else "闯 关 失 败", 46,
+        ui.draw_text_gradient(surface, "通 关 ！" if win else "闯 关 失 败", 44,
                               S.COLOR_TITLE_TOP, accent,
-                              (panel.centerx, panel.y + 148), bold=True)
+                              (panel.centerx, panel.y + 134), bold=True)
 
         if win:
-            detail = (f"第 {state.level_index + 1} 关「{state.name}」已完成 · "
-                      f"剩余失误 {state.mistakes_left} 次")
-            note = "全部关卡已通关，厉害！" if not state.has_next_level else "准备进入下一关"
+            detail = f"第 {state.level_index + 1} 关「{state.name}」已完成"
         else:
             detail = f"失误次数已耗尽（共 {state.max_mistakes} 次）"
-            note = "再试一次，注意箭头的方向"
+        ui.draw_text(surface, detail, 18, S.COLOR_TEXT_DIM, (panel.centerx, panel.y + 180))
 
-        ui.draw_text(surface, detail, 19, S.COLOR_TEXT_DIM, (panel.centerx, panel.y + 198))
-        ui.draw_text(surface, note, 17, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 230))
+        stats = (f"用时 {score.format_clock(result['seconds'])} · "
+                 f"剩余失误 {state.mistakes_left} / {state.max_mistakes}")
+        ui.draw_text(surface, stats, 18, S.COLOR_TEXT_DIM, (panel.centerx, panel.y + 210))
+
+        if win:
+            ui.draw_text_gradient(surface, f"{score.format_score(result['score'])} 分", 40,
+                                  S.COLOR_TITLE_TOP, accent,
+                                  (panel.centerx, panel.y + 256), bold=True)
+            parts = result["parts"]
+            if parts:
+                ui.draw_text(surface,
+                             "   +   ".join(f"{name} {score.format_score(value)}"
+                                            for name, value in parts),
+                             14, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 292))
+            note, note_color = self.record_note(result)
+            ui.draw_text(surface, note, 15, note_color, (panel.centerx, panel.y + 320))
+        else:
+            ui.draw_text(surface, "再试一次，先想清楚哪个箭头能直接飞出去",
+                         17, S.COLOR_TEXT_FAINT, (panel.centerx, panel.y + 258))
 
         for button in self.overlay_buttons:
             button.draw(surface)
@@ -692,7 +756,8 @@ class SelectScene:
         ui.draw_text_gradient(surface, "选 择 关 卡", 44, S.COLOR_TITLE_TOP,
                               S.COLOR_TITLE_BOTTOM, (cx, 82), bold=True)
         ui.draw_text(surface, f"共 {len(LEVELS)} 关 · 已通关 "
-                              f"{self.app.progress.cleared_count} 关",
+                              f"{self.app.progress.cleared_count} 关 · "
+                              f"总分 {score.format_score(self.app.progress.total_score)}",
                      17, S.COLOR_TEXT_DIM, (cx, 130))
         for index, rect in enumerate(self.cards):
             self.draw_card(surface, index, rect)
@@ -748,7 +813,11 @@ class SelectScene:
                      (rect.centerx, rect.y + 97))
 
         if cleared:
-            self.draw_status(surface, rect, "已通关", S.COLOR_SUCCESS, icon="check")
+            best_time = self.app.progress.best_seconds(index)
+            text = f"{score.format_score(self.app.progress.best_score(index))} 分"
+            if best_time is not None:
+                text += f" · {score.format_clock(best_time)}"
+            self.draw_status(surface, rect, text, S.COLOR_SUCCESS, icon="check")
         elif unlocked:
             self.draw_status(surface, rect, "可挑战", S.COLOR_TEXT_DIM)
         else:
