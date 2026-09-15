@@ -14,10 +14,18 @@ import settings as S
 import ui
 from effects import Bounce, FlyOut
 from game import DIRECTION_NAMES, DIRECTION_VECTORS
+from levels import LEVELS
 from ui import Button
 
 # 顶部信息栏做成一张浮起的卡片，而不是通栏色块
 TOP_BAR_CARD = pygame.Rect(20, 12, S.WINDOW_WIDTH - 40, 72)
+
+# 选关界面的卡片网格
+SELECT_CARD_WIDTH = 196
+SELECT_CARD_HEIGHT = 130
+SELECT_COLUMNS = 4
+SELECT_GAP = 20
+SELECT_TOP = 172
 
 # 开始界面说明行的图标顺序
 RULE_DIRECTIONS = ("up", "down", "left", "right")
@@ -69,6 +77,32 @@ def cell_at(pos, grid, cell, rows, cols):
     return None
 
 
+def select_card_rects(count):
+    """算出选关界面每一张关卡卡片的位置（按行排列、整体居中）。"""
+    rows = (count + SELECT_COLUMNS - 1) // SELECT_COLUMNS
+    total_w = SELECT_COLUMNS * SELECT_CARD_WIDTH + (SELECT_COLUMNS - 1) * SELECT_GAP
+    left = (S.WINDOW_WIDTH - total_w) // 2
+    rects = []
+    for index in range(count):
+        row, col = divmod(index, SELECT_COLUMNS)
+        rects.append(pygame.Rect(
+            left + col * (SELECT_CARD_WIDTH + SELECT_GAP),
+            SELECT_TOP + row * (SELECT_CARD_HEIGHT + SELECT_GAP),
+            SELECT_CARD_WIDTH, SELECT_CARD_HEIGHT))
+    return rects
+
+
+def draw_lock(surface, center, size, color):
+    """画一个简单的挂锁图标：圆环当锁梁，矩形当锁体，锁体盖住圆环下半。"""
+    cx, cy = center
+    thickness = max(2, int(size * 0.15))
+    pygame.draw.circle(surface, color, (int(cx), int(cy - size * 0.12)),
+                       int(size * 0.26), thickness)
+    body = pygame.Rect(0, 0, int(size * 0.72), int(size * 0.54))
+    body.center = (int(cx), int(cy + size * 0.16))
+    pygame.draw.rect(surface, color, body, border_radius=max(2, int(size * 0.12)))
+
+
 def draw_panel(surface, rect, radius=20, top_color=None, bottom_color=None,
                border_color=None, border_width=2, shadow_alpha=100, shadow_offset=(0, 8)):
     """画一张浮起的面板：阴影 + 渐变底 + 描边 + 顶部高光。"""
@@ -90,9 +124,10 @@ class StartScene:
         self.time = 0.0
         cx = S.WINDOW_WIDTH // 2
         self.buttons = [
-            Button((cx - 150, 556, 300, 66), "开 始 游 戏", self.app.start_new_game,
+            Button((cx - 150, 540, 300, 64), "开 始 游 戏", self.app.start_new_game,
                    style="primary", font_size=27),
-            Button((cx - 95, 640, 190, 50), "退出游戏", self.app.quit, font_size=20),
+            Button((cx - 195, 616, 185, 48), "选择关卡", self.app.goto_select, font_size=20),
+            Button((cx + 10, 616, 185, 48), "退出游戏", self.app.quit, font_size=20),
         ]
 
     def on_escape(self):
@@ -122,11 +157,11 @@ class StartScene:
                               (cx, 236), bold=True)
         ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 296))
         pygame.draw.line(surface, ui.mix(S.COLOR_ACCENT, S.COLOR_BG_BOTTOM, 0.62),
-                         (cx - 150, 318), (cx + 150, 318), 2)
+                         (cx - 150, 310), (cx + 150, 310), 2)
 
         # 玩法说明面板
         panel = pygame.Rect(0, 0, 740, 206)
-        panel.center = (cx, 433)
+        panel.center = (cx, 424)
         draw_panel(surface, panel)
         ui.draw_round_rect(surface, pygame.Rect(panel.x + 22, panel.y + 34, 4, 24),
                            S.COLOR_ACCENT, 2)
@@ -144,7 +179,7 @@ class StartScene:
         for button in self.buttons:
             button.draw(surface)
 
-        ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 730))
+        ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 722))
 
 
 # ==================================================================== 游戏界面
@@ -169,8 +204,8 @@ class GameScene:
         self.buttons = [
             Button((right - 260, TOP_BAR_CARD.y + 14, 124, 44), "重新开始",
                    self.restart_level, font_size=19),
-            Button((right - 124, TOP_BAR_CARD.y + 14, 124, 44), "返回菜单",
-                   self.back_to_menu, font_size=19),
+            Button((right - 124, TOP_BAR_CARD.y + 14, 124, 44), "选择关卡",
+                   self.goto_select, font_size=19),
         ]
 
     # ---------------------------------------------------------- 对外动作
@@ -195,8 +230,8 @@ class GameScene:
     def replay_all(self):
         self.app.start_new_game()
 
-    def back_to_menu(self):
-        self.app.goto_start()
+    def goto_select(self):
+        self.app.goto_select()
 
     # ---------------------------------------------------------- 界面反馈
     def show_toast(self, text, color=S.COLOR_TEXT, duration=1.8):
@@ -223,7 +258,7 @@ class GameScene:
     def on_escape(self):
         if self.overlay:            # 结算浮层只能用按钮关闭，避免误触后卡住
             return
-        self.back_to_menu()
+        self.goto_select()
 
     def handle_event(self, event):
         if self.overlay:
@@ -307,6 +342,7 @@ class GameScene:
         if self.overlay or self.animations:
             return
         if not self.state.arrows:
+            self.app.progress.mark_cleared(self.state.level_index)
             self.open_overlay("win")
         elif self.state.lost:
             self.open_overlay("lose")
@@ -505,15 +541,15 @@ class GameScene:
             if self.state.has_next_level:
                 entries = [("下一关", self.goto_next_level, "primary"),
                            ("重玩本关", self.restart_level, "normal"),
-                           ("返回菜单", self.back_to_menu, "normal")]
+                           ("选择关卡", self.goto_select, "normal")]
             else:
                 entries = [("再玩一遍", self.replay_all, "primary"),
                            ("重玩本关", self.restart_level, "normal"),
-                           ("返回菜单", self.back_to_menu, "normal")]
+                           ("选择关卡", self.goto_select, "normal")]
             width, gap = 146, 16
         else:
             entries = [("再试一次", self.restart_level, "primary"),
-                       ("返回菜单", self.back_to_menu, "normal")]
+                       ("选择关卡", self.goto_select, "normal")]
             width, gap = 168, 18
 
         total = len(entries) * width + (len(entries) - 1) * gap
@@ -590,3 +626,159 @@ class GameScene:
 def darken_soft(color, amount):
     """ui.darken 的薄封装，让徽章底色不至于全黑。"""
     return ui.mix(color, (10, 12, 20), amount)
+
+
+# ==================================================================== 选关界面
+class SelectScene:
+    """按难度分档展示全部关卡，点卡片直接开始；未解锁的关卡显示为灰色。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.time = 0.0
+        self.hover_index = None
+        self.cards = select_card_rects(len(LEVELS))
+        self.notice_text = ""
+        self.notice_timer = 0.0
+        cx = S.WINDOW_WIDTH // 2
+        self.buttons = [
+            Button((cx - 95, 610, 190, 46), "返回主菜单", self.app.goto_start,
+                   font_size=19),
+        ]
+
+    # ---------------------------------------------------------- 状态
+    def is_unlocked(self, index):
+        return self.app.progress.is_unlocked(index, S.UNLOCK_ALL_LEVELS)
+
+    def card_index_at(self, pos):
+        for index, rect in enumerate(self.cards):
+            if rect.collidepoint(pos):
+                return index
+        return None
+
+    def show_notice(self, text, duration=1.8):
+        self.notice_text = text
+        self.notice_timer = duration
+
+    # ---------------------------------------------------------- 事件
+    def on_escape(self):
+        self.app.goto_start()
+
+    def handle_event(self, event):
+        for button in self.buttons:
+            button.handle_event(event)
+        if event.type == pygame.MOUSEMOTION:
+            index = self.card_index_at(event.pos)
+            self.hover_index = (index if index is not None and self.is_unlocked(index)
+                                else None)
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            index = self.card_index_at(event.pos)
+            if index is not None:
+                self.pick(index)
+
+    def pick(self, index):
+        if not self.is_unlocked(index):
+            self.show_notice("先通关前一关，才能解锁这一关")
+            return
+        self.app.start_level(index)
+
+    def update(self, dt):
+        self.time += dt
+        if self.notice_timer > 0:
+            self.notice_timer = max(0.0, self.notice_timer - dt)
+
+    # ---------------------------------------------------------- 绘制
+    def draw(self, surface):
+        cx = S.WINDOW_WIDTH // 2
+        ui.draw_text_gradient(surface, "选 择 关 卡", 44, S.COLOR_TITLE_TOP,
+                              S.COLOR_TITLE_BOTTOM, (cx, 82), bold=True)
+        ui.draw_text(surface, f"共 {len(LEVELS)} 关 · 已通关 "
+                              f"{self.app.progress.cleared_count} 关",
+                     17, S.COLOR_TEXT_DIM, (cx, 130))
+        for index, rect in enumerate(self.cards):
+            self.draw_card(surface, index, rect)
+        for button in self.buttons:
+            button.draw(surface)
+        ui.draw_text(surface, "按 Esc 返回主菜单", 16, S.COLOR_TEXT_FAINT, (cx, 730))
+        self.draw_notice(surface)
+
+    def draw_card(self, surface, index, rect):
+        level = LEVELS[index]
+        tier_color = S.TIER_COLORS.get(level.tier, S.COLOR_ACCENT)
+        cleared = self.app.progress.is_cleared(index)
+        unlocked = self.is_unlocked(index)
+        hovered = self.hover_index == index
+        accent = S.COLOR_SUCCESS if cleared else tier_color
+
+        if unlocked:
+            top, bottom = S.COLOR_PANEL_TOP, S.COLOR_PANEL_BOTTOM
+            border = ui.lighten(accent, 0.10)
+        else:
+            top = ui.mix(S.COLOR_PANEL_TOP, S.COLOR_BG_BOTTOM, 0.55)
+            bottom = ui.mix(S.COLOR_PANEL_BOTTOM, S.COLOR_BG_BOTTOM, 0.55)
+            border = S.COLOR_PANEL_BORDER
+            accent = S.COLOR_TEXT_FAINT
+
+        if hovered:
+            ui.draw_glow(surface, rect.center, int(rect.width * 0.60), accent,
+                         alpha=40, layers=20)
+        ui.draw_shadow(surface, rect, radius=18, spread=12, alpha=90, offset=(0, 6))
+        surface.blit(ui.round_rect_surface(rect.size, 18, top, bottom, border, 2,
+                                           highlight=True), rect.topleft)
+
+        # 左上角关卡编号
+        badge = pygame.Rect(rect.x + 16, rect.y + 14, 34, 34)
+        ui.draw_round_rect(surface, badge, accent, 10)
+        ui.draw_text(surface, f"{index + 1:02d}", 16,
+                     S.COLOR_BG_BOTTOM if unlocked else S.COLOR_PANEL_BOTTOM,
+                     badge.center, bold=True)
+
+        # 右上角难度档
+        pill_w = ui.text_width(level.tier, 13) + 18
+        pill = pygame.Rect(rect.right - 14 - pill_w, rect.y + 21, pill_w, 21)
+        ui.draw_round_rect(surface, pill, ui.mix(accent, S.COLOR_BG_BOTTOM, 0.6), 10,
+                           accent, 1)
+        ui.draw_text(surface, level.tier, 13, accent, pill.center)
+
+        ui.draw_text(surface, level.name, 21,
+                     S.COLOR_TEXT if unlocked else S.COLOR_TEXT_FAINT,
+                     (rect.centerx, rect.y + 72), bold=True)
+        ui.draw_text(surface, f"{level.rows} × {level.cols} · "
+                              f"{len(level.arrows)} 个箭头",
+                     13, S.COLOR_TEXT_DIM if unlocked else S.COLOR_TEXT_FAINT,
+                     (rect.centerx, rect.y + 97))
+
+        if cleared:
+            self.draw_status(surface, rect, "已通关", S.COLOR_SUCCESS, icon="check")
+        elif unlocked:
+            self.draw_status(surface, rect, "可挑战", S.COLOR_TEXT_DIM)
+        else:
+            self.draw_status(surface, rect, "未解锁", S.COLOR_TEXT_FAINT, icon="lock")
+
+    @staticmethod
+    def draw_status(surface, rect, text, color, icon=None):
+        text_w = ui.text_width(text, 13)
+        icon_w = 17 if icon else 0
+        left = rect.centerx - (text_w + icon_w) / 2
+        y = rect.y + 116
+        if icon == "check":
+            pygame.draw.lines(surface, color, False,
+                              [(left, y), (left + 4, y + 5), (left + 12, y - 5)], 2)
+        elif icon == "lock":
+            draw_lock(surface, (left + 6, y), 16, color)
+        ui.draw_text(surface, text, 13, color, (left + icon_w, y), anchor="midleft")
+
+    def draw_notice(self, surface):
+        if self.notice_timer <= 0 or not self.notice_text:
+            return
+        alpha = int(255 * min(1.0, self.notice_timer / 0.4))
+        image = ui.font(18, bold=True).render(self.notice_text, True, S.COLOR_WARN)
+        pill = image.get_rect().inflate(44, 20)
+        pill.center = (S.WINDOW_WIDTH // 2, 686)
+        layer = pygame.Surface(pill.size, pygame.SRCALPHA)
+        pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
+                         layer.get_rect(), border_radius=pill.height // 2)
+        pygame.draw.rect(layer, (*S.COLOR_WARN, int(alpha * 0.75)), layer.get_rect(),
+                         width=2, border_radius=pill.height // 2)
+        image.set_alpha(alpha)
+        layer.blit(image, image.get_rect(center=(pill.width // 2, pill.height // 2)))
+        surface.blit(layer, pill)
