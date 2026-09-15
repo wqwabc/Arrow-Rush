@@ -128,12 +128,27 @@ class StartScene:
         self.app = app
         self.time = 0.0
         cx = S.WINDOW_WIDTH // 2
-        self.buttons = [
-            Button((cx - 150, 540, 300, 64), "开 始 游 戏", self.app.start_new_game,
-                   style="primary", font_size=27),
-            Button((cx - 195, 616, 185, 48), "选择关卡", self.app.goto_select, font_size=20),
-            Button((cx + 10, 616, 185, 48), "退出游戏", self.app.quit, font_size=20),
-        ]
+        session = app.session
+        if session.exists:
+            primary = (f"继续第 {session.level_index + 1} 关", app.continue_game)
+            secondary = [("新游戏", app.start_new_game),
+                         ("选择关卡", app.goto_select),
+                         ("退出游戏", app.quit)]
+            second_w, second_gap = 168, 14
+        else:
+            primary = ("开 始 游 戏", app.start_new_game)
+            secondary = [("选择关卡", app.goto_select),
+                         ("退出游戏", app.quit)]
+            second_w, second_gap = 185, 14
+
+        self.buttons = [Button((cx - 150, 532, 300, 64), primary[0], primary[1],
+                               style="primary", font_size=27)]
+        total = len(secondary) * second_w + (len(secondary) - 1) * second_gap
+        x = cx - total // 2
+        for label, callback in secondary:
+            self.buttons.append(Button((x, 608, second_w, 48), label, callback,
+                                       font_size=20))
+            x += second_w + second_gap
 
     def on_escape(self):
         self.app.quit()
@@ -159,14 +174,14 @@ class StartScene:
 
         ui.draw_text_gradient(surface, "一箭又一箭", 84,
                               S.COLOR_TITLE_TOP, S.COLOR_TITLE_BOTTOM,
-                              (cx, 216), bold=True)
-        ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 276))
+                              (cx, 208), bold=True)
+        ui.draw_text(surface, "Arrow Escape", 21, S.COLOR_TEXT_DIM, (cx, 268))
         pygame.draw.line(surface, ui.mix(S.COLOR_ACCENT, S.COLOR_BG_BOTTOM, 0.62),
-                         (cx - 150, 288), (cx + 150, 288), 2)
+                         (cx - 150, 280), (cx + 150, 280), 2)
 
         # 玩法说明面板
         panel = pygame.Rect(0, 0, 740, 236)
-        panel.center = (cx, 410)
+        panel.center = (cx, 400)
         draw_panel(surface, panel)
         ui.draw_round_rect(surface, pygame.Rect(panel.x + 22, panel.y + 34, 4, 24),
                            S.COLOR_ACCENT, 2)
@@ -244,6 +259,7 @@ class GameScene:
         self.clear_feedback()
         self.close_overlay()
         self.show_toast("已重新开始本关", S.COLOR_ACCENT)
+        self.save_progress()
 
     def goto_next_level(self):
         if self.state.has_next_level:
@@ -251,12 +267,44 @@ class GameScene:
             self.clear_feedback()
             self.close_overlay()
             self.show_toast(f"进入第 {self.state.level_index + 1} 关", S.COLOR_ACCENT)
+            self.save_progress()
 
     def replay_all(self):
         self.app.start_new_game()
 
     def goto_select(self):
         self.app.goto_select()
+
+    # ---------------------------------------------------------- 单局存档
+    def save_progress(self):
+        """把本关当前状态写进单局存档，随时退出都能接着玩。
+
+        已经结算完的关卡不用存——通关或失败都表示这一关已经结束了。
+        """
+        if self.overlay:
+            return
+        state = self.state
+        self.app.session.save(
+            level=state.level_index,
+            arrows=state.arrows,
+            mistakes=state.mistakes,
+            elapsed=state.elapsed,
+            hints_left=self.hints_left,
+            undos_left=self.undos_left,
+            history=self.history,
+        )
+
+    def restore(self, payload):
+        """从单局存档恢复本关进度。"""
+        state = self.state
+        state.arrows = dict(payload["arrows"])
+        state.mistakes = payload["mistakes"]
+        state.elapsed = payload["elapsed"]
+        state.final_time = None
+        self.hints_left = min(payload["hints_left"], S.HINTS_PER_LEVEL)
+        self.undos_left = min(payload["undos_left"], S.UNDOS_PER_LEVEL)
+        self.history = list(payload["history"])
+        self.refresh_action_buttons()
 
     # ---------------------------------------------------------- 界面反馈
     def show_toast(self, text, color=S.COLOR_TEXT, duration=1.8):
@@ -295,6 +343,7 @@ class GameScene:
         self.hint_cell = cell
         self.hint_timer = S.HINT_SECONDS
         self.refresh_action_buttons()
+        self.save_progress()
         left = self.hints_left
         tail = f"（还剩 {left} 次）" if left else "（提示已用完）"
         self.show_toast(f"试试金框标出的箭头 {tail}", S.COLOR_HINT, 2.2)
@@ -324,6 +373,7 @@ class GameScene:
 
         self.undos_left -= 1
         self.refresh_action_buttons()
+        self.save_progress()
         tail = f"（还剩 {self.undos_left} 次）" if self.undos_left else "（撤销已用完）"
         self.show_toast(f"{label} {tail}", S.COLOR_UNDO, 1.9)
 
@@ -386,6 +436,7 @@ class GameScene:
         else:
             self.block(cell, direction)
         self.refresh_action_buttons()
+        self.save_progress()
 
     def is_animating(self, cell):
         return any(anim.cell == cell for anim in self.animations)
@@ -455,6 +506,7 @@ class GameScene:
         seconds = state.stop_clock()
         hints_used = S.HINTS_PER_LEVEL - self.hints_left
         undos_used = S.UNDOS_PER_LEVEL - self.undos_left
+        self.app.session.clear()          # 这一关结束了，单局存档没用了
         if win:
             total, parts = score.breakdown(state.level, seconds, state.mistakes_left,
                                            hints_used, undos_used)
