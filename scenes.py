@@ -10,10 +10,11 @@ import math
 
 import pygame
 
+import audio
 import settings as S
 import score
 import ui
-from effects import Bounce, FlyOut
+from effects import ArrowAppear, Bounce, FlyOut, ease_out_cubic
 from game import DIRECTION_NAMES, DIRECTION_VECTORS
 from levels import LEVELS
 from ui import Button
@@ -108,6 +109,29 @@ def draw_lock(surface, center, size, color):
     pygame.draw.rect(surface, color, body, border_radius=max(2, int(size * 0.12)))
 
 
+def draw_toast_pill(surface, text, color, alpha, midleft):
+    """底部那种圆角提示条，三个界面共用一套画法。"""
+    alpha = max(0, min(255, int(alpha)))
+    if alpha <= 0:
+        return
+    image = ui.font(19, bold=True).render(text, True, color)
+    pill = image.get_rect().inflate(48, 22)
+    pill.midleft = midleft
+    layer = pygame.Surface(pill.size, pygame.SRCALPHA)
+    pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
+                     layer.get_rect(), border_radius=pill.height // 2)
+    pygame.draw.rect(layer, (*color, int(alpha * 0.75)), layer.get_rect(),
+                     width=2, border_radius=pill.height // 2)
+    image.set_alpha(alpha)
+    layer.blit(image, image.get_rect(center=(pill.width // 2, pill.height // 2)))
+    surface.blit(layer, pill)
+
+
+def notice_alpha(timer, duration=0.4):
+    """提示条的淡出透明度，配合滑入动画用。"""
+    return int(255 * min(1.0, timer / duration))
+
+
 def draw_panel(surface, rect, radius=20, top_color=None, bottom_color=None,
                border_color=None, border_width=2, shadow_alpha=100, shadow_offset=(0, 8)):
     """画一张浮起的面板：阴影 + 渐变底 + 描边 + 顶部高光。"""
@@ -127,6 +151,9 @@ class StartScene:
     def __init__(self, app):
         self.app = app
         self.time = 0.0
+        self.notice_text = ""
+        self.notice_timer = 0.0
+        self.notice_duration = 1.0
         cx = S.WINDOW_WIDTH // 2
         session = app.session
         if session.exists:
@@ -159,6 +186,24 @@ class StartScene:
 
     def update(self, dt):
         self.time += dt
+        if self.notice_timer > 0:
+            self.notice_timer = max(0.0, self.notice_timer - dt)
+        for button in self.buttons:
+            button.update(dt)
+
+    def show_notice(self, text, duration=1.8):
+        self.notice_text = text
+        self.notice_timer = duration
+        self.notice_duration = duration
+
+    def draw_notice(self, surface):
+        if self.notice_timer <= 0 or not self.notice_text:
+            return
+        shown = self.notice_duration - self.notice_timer
+        slide = 1.0 - ease_out_cubic(min(1.0, shown / 0.16))
+        draw_toast_pill(surface, self.notice_text, S.COLOR_TIME,
+                        notice_alpha(self.notice_timer) * (1.0 - 0.85 * slide),
+                        (S.WINDOW_WIDTH // 2 - 150 + int(30 * (1.0 - slide)), 690))
 
     def draw(self, surface):
         cx = S.WINDOW_WIDTH // 2
@@ -204,7 +249,9 @@ class StartScene:
                      f"已通关 {progress.cleared_count} / {len(LEVELS)} 关 · "
                      f"总分 {score.format_score(progress.total_score)}",
                      16, S.COLOR_TEXT_DIM, (cx, 690))
-        ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 722))
+        ui.draw_text(surface, "按 Esc 退出游戏 · 按 M 静音", 16,
+                     S.COLOR_TEXT_FAINT, (cx, 722))
+        self.draw_notice(surface)
 
 
 # ==================================================================== 游戏界面
@@ -218,12 +265,15 @@ class GameScene:
 
         self.animations = []             # 正在播放的箭头动画（飞出 / 碰撞）
         self.hover_cell = None
+        self.hover_anim = {}             # 格子 -> 0~1 的悬停过渡，避免高亮硬切
+        self.appear_anims = {}           # 开局箭头逐个弹出的入场动画
         self.hit_cell = None             # 刚被挡住的格子，画一圈红色扩散环
         self.hit_timer = 0.0
 
         self.toast_text = ""
         self.toast_color = S.COLOR_TEXT
         self.toast_timer = 0.0
+        self.toast_duration = 1.0
 
         self.result = None               # 本关结算数据（得分明细等）
 
@@ -233,6 +283,8 @@ class GameScene:
 
         self.undos_left = S.UNDOS_PER_LEVEL
         self.history = []                # 本关的操作记录，供撤销回退
+
+        self.start_appear_animation()
 
         right = TOP_BAR_CARD.right - 20
         self.buttons = [
@@ -311,6 +363,26 @@ class GameScene:
         self.toast_text = text
         self.toast_color = color
         self.toast_timer = duration
+        self.toast_duration = duration
+
+    def start_appear_animation(self):
+        """开局让箭头按对角线顺序逐个弹出，比整盘突然出现顺眼。"""
+        self.appear_anims = {
+            cell: ArrowAppear(cell, (cell[0] + cell[1]) * S.ARROW_ENTER_STAGGER)
+            for cell in self.state.arrows
+        }
+
+    def update_hover_anim(self, dt):
+        """把每个格子的悬停强度平滑逼近目标值，移开时也淡出而不是硬切。"""
+        if self.hover_cell is not None:
+            self.hover_anim.setdefault(self.hover_cell, 0.0)
+        for cell in list(self.hover_anim):
+            target = 1.0 if cell == self.hover_cell else 0.0
+            value = ui.approach(self.hover_anim[cell], target, S.HOVER_LERP, dt)
+            if target == 0.0 and value < 0.02:
+                del self.hover_anim[cell]
+            else:
+                self.hover_anim[cell] = value
 
     def clear_feedback(self):
         self.animations.clear()
@@ -324,6 +396,8 @@ class GameScene:
         self.hint_timer = 0.0
         self.undos_left = S.UNDOS_PER_LEVEL
         self.history.clear()
+        self.hover_anim.clear()
+        self.start_appear_animation()
         self.refresh_action_buttons()
 
     def refresh_action_buttons(self):
@@ -331,6 +405,9 @@ class GameScene:
         self.hint_button.enabled = self.hints_left > 0
         self.undo_button.label = f"撤销 ×{self.undos_left}"
         self.undo_button.enabled = self.undos_left > 0 and bool(self.history)
+
+    def all_buttons(self):
+        return self.buttons + [self.undo_button, self.hint_button] + self.overlay_buttons
 
     def use_hint(self):
         """标出一个当前能直接消掉的箭头，供玩家参考。"""
@@ -344,6 +421,7 @@ class GameScene:
         self.hint_timer = S.HINT_SECONDS
         self.refresh_action_buttons()
         self.save_progress()
+        audio.play("hint")
         left = self.hints_left
         tail = f"（还剩 {left} 次）" if left else "（提示已用完）"
         self.show_toast(f"试试金框标出的箭头 {tail}", S.COLOR_HINT, 2.2)
@@ -374,6 +452,7 @@ class GameScene:
         self.undos_left -= 1
         self.refresh_action_buttons()
         self.save_progress()
+        audio.play("undo")
         tail = f"（还剩 {self.undos_left} 次）" if self.undos_left else "（撤销已用完）"
         self.show_toast(f"{label} {tail}", S.COLOR_UNDO, 1.9)
 
@@ -451,6 +530,7 @@ class GameScene:
         self.history.append({"kind": "launch", "cell": cell, "direction": direction})
         self.hit_cell = None
         self.hit_timer = 0.0
+        audio.play("fly")
 
     def block(self, cell, direction):
         """前方有阻挡：消耗一次失误，箭头前冲回弹 + 闪白 + 文字提示。"""
@@ -461,6 +541,7 @@ class GameScene:
         self.history.append({"kind": "block", "cell": cell})
         self.hit_cell = cell
         self.hit_timer = 0.55
+        audio.play("block")
         self.show_toast(
             f"「{DIRECTION_NAMES[direction]}」向被挡住 · "
             f"失误 {state.mistakes} / {state.max_mistakes}",
@@ -472,6 +553,12 @@ class GameScene:
         for anim in list(self.animations):
             if anim.update(dt):
                 self.animations.remove(anim)
+        for cell in list(self.appear_anims):
+            if self.appear_anims[cell].update(dt):
+                del self.appear_anims[cell]
+        self.update_hover_anim(dt)
+        for button in self.all_buttons():
+            button.update(dt)
         if self.hit_timer > 0:
             self.hit_timer = max(0.0, self.hit_timer - dt)
         if self.hint_timer > 0:
@@ -515,11 +602,13 @@ class GameScene:
             self.result = {"score": total, "parts": parts, "seconds": seconds,
                            "hints_used": hints_used, "undos_used": undos_used,
                            "better_score": better_score, "better_time": better_time}
+            audio.play("win")
             self.open_overlay("win")
         else:
             self.result = {"score": 0, "parts": [], "seconds": seconds,
                            "hints_used": hints_used, "undos_used": undos_used,
                            "better_score": False, "better_time": False}
+            audio.play("lose")
             self.open_overlay("lose")
 
     # ---------------------------------------------------------- 绘制
@@ -612,19 +701,23 @@ class GameScene:
         for row in range(state.rows):
             for col in range(state.cols):
                 center = cell_rect(grid, cell, row, col).center
-                hovered = self.hover_cell == (row, col) and (row, col) not in busy
-                if hovered:
+                hovered = (row, col) not in busy
+                amount = self.hover_anim.get((row, col), 0.0) if hovered else 0.0
+                if amount > 0.02:
                     ui.draw_glow(surface, center, int(tile_px * 0.95), S.COLOR_ACCENT,
-                                 alpha=40, layers=22)
-                surface.blit(tile_hover if hovered else tile, tile.get_rect(center=center))
+                                 alpha=int(40 * amount), layers=22)
+                if amount > 0.5:
+                    surface.blit(tile_hover, tile_hover.get_rect(center=center))
+                else:
+                    surface.blit(tile, tile.get_rect(center=center))
 
         # 留在棋盘上的箭头（正在碰撞回弹的会带偏移和闪白）
         for (row, col), direction in state.arrows.items():
-            offset, color, scale = self.arrow_pose(row, col, direction, busy)
+            offset, color, scale, alpha = self.arrow_pose(row, col, direction, busy)
             center = cell_rect(grid, cell, row, col).center
             center = (center[0] + offset[1] * cell, center[1] + offset[0] * cell)
             ui.draw_arrow(surface, center, cell * S.ARROW_SCALE, direction,
-                          color, scale=scale)
+                          color, alpha=alpha, scale=scale)
 
         # 正在飞出棋盘的箭头
         for anim in self.animations:
@@ -650,34 +743,51 @@ class GameScene:
         surface.blit(ring, ring.get_rect(center=center))
 
     def arrow_pose(self, row, col, direction, busy):
-        """算出某个箭头的 (位移格数, 颜色, 缩放)：碰撞时前冲、闪白、略微放大。"""
+        """算出某个箭头的 (位移格数, 颜色, 缩放, 透明度)。
+
+        悬停是平滑过渡的；碰撞时前冲、闪白、略微放大；刚开局时逐个弹出。
+        """
         base = S.ARROW_COLORS[direction]
+        alpha = 255
+        scale = 1.0
+
+        appear = self.appear_anims.get((row, col))
+        if appear is not None:
+            scale *= appear.scale
+            alpha = appear.alpha
+
         bounce = next((a for a in self.animations
                        if a.kind == "bounce" and a.cell == (row, col)), None)
-        if bounce is None:
-            hovered = self.hover_cell == (row, col) and (row, col) not in busy
-            return (0.0, 0.0), base, 1.06 if hovered else 1.0
-        color = ui.mix(base, (255, 246, 246), 0.62 * bounce.flash)
-        return bounce.offset(), color, 1.0 + 0.05 * bounce.flash
+        if bounce is not None:
+            color = ui.mix(base, (255, 246, 246), 0.62 * bounce.flash)
+            return bounce.offset(), color, scale * bounce.scale, alpha
+
+        amount = self.hover_anim.get((row, col), 0.0) if (row, col) not in busy else 0.0
+        return (0.0, 0.0), base, scale * (1.0 + 0.06 * amount), alpha
 
     def draw_flight(self, surface, grid, cell, anim):
-        """画出正在飞出的箭头，身后带三段渐隐拖尾。"""
+        """画出正在飞出的箭头：身后拖一条随速度拉长的渐隐轨迹。"""
         dr, dc = DIRECTION_VECTORS[anim.direction]
         base = cell_rect(grid, cell, *anim.cell).center
         arrow_size = cell * S.ARROW_SCALE
         alpha_ratio = anim.alpha / 255.0
+        # 越飞越快，拖尾也越拉越长，看起来才有速度感
+        stretch = 0.35 + anim.progress * 0.95
 
         def at(traveled):
             return (base[0] + dc * traveled * cell, base[1] + dr * traveled * cell)
 
-        for back, ghost_alpha in ((0.62, 34), (0.42, 58), (0.22, 96)):
+        for back, ghost_alpha in ((1.30, 18), (1.00, 28), (0.72, 44),
+                                  (0.46, 66), (0.22, 100)):
             ghost = int(ghost_alpha * alpha_ratio)
-            if ghost > 0:
-                ui.draw_arrow(surface, at(max(0.0, anim.traveled - back)),
-                              arrow_size, anim.direction, anim.color, alpha=ghost)
+            if ghost <= 0:
+                continue
+            traveled = max(0.0, anim.traveled - back * stretch)
+            ui.draw_arrow(surface, at(traveled), arrow_size, anim.direction,
+                          anim.color, alpha=ghost, scale=1.0 + 0.05 * anim.progress)
         if anim.alpha > 0:
-            ui.draw_arrow(surface, at(anim.traveled), arrow_size,
-                          anim.direction, anim.color, alpha=anim.alpha)
+            ui.draw_arrow(surface, at(anim.traveled), arrow_size, anim.direction,
+                          anim.color, alpha=anim.alpha, scale=anim.scale)
 
     def draw_hit_ring(self, surface, grid, cell, tile_px, tile_radius):
         """被挡住时在格子上扩散一圈红色光环。"""
@@ -715,21 +825,18 @@ class GameScene:
     def draw_toast(self, surface):
         if self.toast_timer <= 0 or not self.toast_text:
             return
-        alpha = int(255 * min(1.0, self.toast_timer / 0.4))
-        image = ui.font(19, bold=True).render(self.toast_text, True, self.toast_color)
-        pill = image.get_rect().inflate(48, 22)
-        # 左对齐，给右下角的撤销 / 提示按钮让位
-        pill.midleft = (40, S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT
-                        + S.BOTTOM_BAR_HEIGHT // 2)
+        # 左对齐，给右下角的撤销 / 提示按钮让位；出现时从左侧滑入
+        shown = self.toast_duration - self.toast_timer
+        slide = 1.0 - ease_out_cubic(min(1.0, shown / 0.16))
+        draw_toast_pill(surface, self.toast_text, self.toast_color,
+                        notice_alpha(self.toast_timer) * (1.0 - 0.85 * slide),
+                        (40 - int(30 * slide),
+                         S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT
+                         + S.BOTTOM_BAR_HEIGHT // 2))
 
-        layer = pygame.Surface(pill.size, pygame.SRCALPHA)
-        pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
-                         layer.get_rect(), border_radius=pill.height // 2)
-        pygame.draw.rect(layer, (*self.toast_color, int(alpha * 0.75)), layer.get_rect(),
-                         width=2, border_radius=pill.height // 2)
-        image.set_alpha(alpha)
-        layer.blit(image, image.get_rect(center=(pill.width // 2, pill.height // 2)))
-        surface.blit(layer, pill)
+    def show_notice(self, text, duration=1.8):
+        """通用提示（静音开关之类），复用底部的提示条。"""
+        self.show_toast(text, S.COLOR_TIME, duration)
 
     # -------------------------------------------------- 结算浮层
     @staticmethod
@@ -891,6 +998,7 @@ class SelectScene:
     def show_notice(self, text, duration=1.8):
         self.notice_text = text
         self.notice_timer = duration
+        self.notice_duration = duration
 
     # ---------------------------------------------------------- 事件
     def on_escape(self):
@@ -918,6 +1026,8 @@ class SelectScene:
         self.time += dt
         if self.notice_timer > 0:
             self.notice_timer = max(0.0, self.notice_timer - dt)
+        for button in self.buttons:
+            button.update(dt)
 
     # ---------------------------------------------------------- 绘制
     def draw(self, surface):
@@ -1008,15 +1118,8 @@ class SelectScene:
     def draw_notice(self, surface):
         if self.notice_timer <= 0 or not self.notice_text:
             return
-        alpha = int(255 * min(1.0, self.notice_timer / 0.4))
-        image = ui.font(18, bold=True).render(self.notice_text, True, S.COLOR_WARN)
-        pill = image.get_rect().inflate(44, 20)
-        pill.center = (S.WINDOW_WIDTH // 2, 686)
-        layer = pygame.Surface(pill.size, pygame.SRCALPHA)
-        pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
-                         layer.get_rect(), border_radius=pill.height // 2)
-        pygame.draw.rect(layer, (*S.COLOR_WARN, int(alpha * 0.75)), layer.get_rect(),
-                         width=2, border_radius=pill.height // 2)
-        image.set_alpha(alpha)
-        layer.blit(image, image.get_rect(center=(pill.width // 2, pill.height // 2)))
-        surface.blit(layer, pill)
+        shown = self.notice_duration - self.notice_timer
+        slide = 1.0 - ease_out_cubic(min(1.0, shown / 0.16))
+        draw_toast_pill(surface, self.notice_text, S.COLOR_WARN,
+                        notice_alpha(self.notice_timer) * (1.0 - 0.85 * slide),
+                        (S.WINDOW_WIDTH // 2 - 150 + int(30 * (1.0 - slide)), 686))

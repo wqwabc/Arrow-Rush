@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pygame
 
+import audio
 import settings as S
 from backdrop import Backdrop
 from game import GameState
@@ -23,10 +24,14 @@ class App:
 
     def __init__(self):
         pygame.init()
+        audio.init()
         pygame.display.set_caption(S.WINDOW_TITLE)
         self.screen = pygame.display.set_mode((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
         self.clock = pygame.time.Clock()
         self.running = True
+        self.fade = 1.0                  # 切界面时从黑场淡入
+        self.veil = pygame.Surface((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
+        self.veil.fill((6, 8, 14))
         self.backdrop = Backdrop((S.WINDOW_WIDTH, S.WINDOW_HEIGHT))
         self.progress = Progress()
         self.progress.load()
@@ -36,6 +41,11 @@ class App:
         self.scene = StartScene(self)
 
     # ---------------------------------------------------------- 界面切换
+    def switch_scene(self, scene):
+        """换界面并重新拉一次黑场，让切换不至于硬切。"""
+        self.scene = scene
+        self.fade = 1.0
+
     def start_new_game(self):
         """从头开始：清掉旧存档，跳到第一个还没通关的关卡。"""
         self.session.clear()
@@ -50,19 +60,20 @@ class App:
         self.state.load_level(min(payload["level"], len(LEVELS) - 1))
         scene = GameScene(self)
         scene.restore(payload)
-        self.scene = scene
+        self.switch_scene(scene)
 
     def start_level(self, index):
         """开始指定关卡（选关界面用），并立刻写一次存档。"""
         self.state.load_level(index)
-        self.scene = GameScene(self)
-        self.scene.save_progress()
+        scene = GameScene(self)
+        scene.save_progress()
+        self.switch_scene(scene)
 
     def goto_select(self):
-        self.scene = SelectScene(self)
+        self.switch_scene(SelectScene(self))
 
     def goto_start(self):
-        self.scene = StartScene(self)
+        self.switch_scene(StartScene(self))
 
     def save_current(self):
         """把当前这一关的状态落盘，关窗口也不会丢。"""
@@ -86,6 +97,13 @@ class App:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     self.scene.on_escape()
                     continue
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+                    muted = audio.toggle_mute()
+                    notice = "已静音（再按 M 恢复）" if muted else "音效已开启"
+                    show = getattr(self.scene, "show_notice", None)
+                    if show:
+                        show(notice)
+                    continue
                 self.scene.handle_event(event)
             if not self.running:
                 break
@@ -94,6 +112,10 @@ class App:
             self.backdrop.update(dt)
             self.backdrop.draw(self.screen)
             self.scene.draw(self.screen)
+            if self.fade > 0:
+                self.fade = max(0.0, self.fade - dt / S.SCENE_FADE_SECONDS)
+                self.veil.set_alpha(int(255 * self.fade ** 1.4))
+                self.screen.blit(self.veil, (0, 0))
             pygame.display.flip()
 
         pygame.quit()

@@ -8,13 +8,26 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 import pygame
 
+import audio
 import settings as S
 
 # ==================================================================== 颜色工具
+
+
+def approach(current, target, speed, dt):
+    """按指数速度把 current 逼近 target，用来做悬停之类的平滑过渡。
+
+    用指数逼近而不是线性：速度与当前差距成正比，看起来自然，
+    而且不依赖帧率（dt 变化时结果一致）。
+    """
+    if dt <= 0:
+        return current
+    return current + (target - current) * (1.0 - math.exp(-speed * dt))
 
 
 def _clamp(value, low=0, high=255):
@@ -333,11 +346,18 @@ def arrow_sprite(direction, size, color):
 
 
 def draw_arrow(surface, center, size, direction, color, alpha=255, scale=1.0):
-    """在指定位置画一个箭头。scale 用于悬停放大等效果。"""
+    """在指定位置画一个箭头。
+
+    scale 用于悬停放大、入场弹出等效果。这里会把 scale 量化——它是逐帧变化的，
+    不量化的话贴图缓存会被无数个"差一点点"的尺寸撑爆。alpha 小于 255 时
+    复制一份贴图再叠加透明度（Sprite 数量有限，开销可以接受）。
+    """
+    if scale != 1.0:
+        scale = max(0.2, round(scale * 20) / 20)
     sprite = arrow_sprite(direction, size * scale, color)
     if alpha < 255:
         sprite = sprite.copy()
-        sprite.set_alpha(alpha)
+        sprite.set_alpha(max(0, alpha))
     surface.blit(sprite, sprite.get_rect(center=center))
 
 
@@ -357,6 +377,16 @@ class Button:
         self.hovered = False
         self.pressed = False
         self.enabled = True
+        self.hover_anim = 0.0           # 0→1 的悬停过渡，避免颜色硬切
+        self.press_anim = 0.0           # 按下时的下沉量
+
+    # -------------------------------------------------- 动画
+    def update(self, dt):
+        """每帧推进悬停/按下的过渡。"""
+        self.hover_anim = approach(self.hover_anim, 1.0 if self.hovered else 0.0,
+                                   S.BUTTON_LERP, dt)
+        self.press_anim = approach(self.press_anim, 1.0 if self.pressed else 0.0,
+                                   S.BUTTON_LERP * 1.6, dt)
 
     # -------------------------------------------------- 交互
     def handle_event(self, event):
@@ -373,6 +403,7 @@ class Button:
             was_pressed = self.pressed
             self.pressed = False
             if was_pressed and self.rect.collidepoint(event.pos):
+                audio.play("pick")
                 if self.on_click:
                     self.on_click()
                 return True
@@ -398,6 +429,7 @@ class Button:
     def draw(self, surface):
         top, bottom, border, text_color, glow = self._palette()
         rect = self.rect.copy()
+        lift = self.hover_anim - self.press_anim * 1.6
 
         if not self.enabled:
             top = mix(top, S.COLOR_BG_BOTTOM, 0.60)
@@ -406,15 +438,18 @@ class Button:
             text_color = S.COLOR_TEXT_FAINT
             draw_shadow(surface, rect, radius=self.radius, spread=6, alpha=60, offset=(0, 2))
         else:
-            if self.pressed:
-                rect.y += 2
-                top, bottom = darken(top, 0.12), darken(bottom, 0.12)
-            elif self.hovered:
-                rect.y -= 1
-                top, bottom = lighten(top, 0.16), lighten(bottom, 0.16)
-                border = lighten(border, 0.20)
-                draw_glow(surface, rect.center, int(rect.width * 0.62), glow, alpha=34, layers=22)
-            draw_shadow(surface, rect, radius=self.radius, spread=9, alpha=95, offset=(0, 4))
+            if self.hover_anim > 0.01:
+                top = lighten(top, 0.16 * self.hover_anim)
+                bottom = lighten(bottom, 0.16 * self.hover_anim)
+                border = lighten(border, 0.20 * self.hover_anim)
+                draw_glow(surface, rect.center, int(rect.width * 0.62), glow,
+                          alpha=int(34 * self.hover_anim), layers=22)
+            if self.press_anim > 0.01:
+                top = darken(top, 0.12 * self.press_anim)
+                bottom = darken(bottom, 0.12 * self.press_anim)
+            rect.y += int(round(-lift))
+            draw_shadow(surface, rect, radius=self.radius, spread=9,
+                        alpha=int(95 - 30 * self.hover_anim), offset=(0, 4))
 
         body = round_rect_surface(rect.size, self.radius, top, bottom,
                                   border, 2, highlight=True)
