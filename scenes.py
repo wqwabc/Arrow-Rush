@@ -12,7 +12,8 @@ import pygame
 
 import settings as S
 import ui
-from game import DIRECTION_NAMES
+from effects import Bounce, FlyOut
+from game import DIRECTION_NAMES, DIRECTION_VECTORS
 from ui import Button
 
 # 顶部信息栏做成一张浮起的卡片，而不是通栏色块
@@ -155,9 +156,10 @@ class GameScene:
         self.overlay = None              # None | "win" | "lose"
         self.overlay_buttons = []
 
+        self.animations = []             # 正在播放的箭头动画（飞出 / 碰撞）
         self.hover_cell = None
-        self.selected = None             # 被点中的格子，用于画选中脉冲
-        self.select_timer = 0.0
+        self.hit_cell = None             # 刚被挡住的格子，画一圈红色扩散环
+        self.hit_timer = 0.0
 
         self.toast_text = ""
         self.toast_color = S.COLOR_TEXT
@@ -203,8 +205,9 @@ class GameScene:
         self.toast_timer = duration
 
     def clear_feedback(self):
-        self.selected = None
-        self.select_timer = 0.0
+        self.animations.clear()
+        self.hit_cell = None
+        self.hit_timer = 0.0
         self.hover_cell = None
         self.toast_timer = 0.0
 
@@ -235,11 +238,6 @@ class GameScene:
             self.update_hover(event.pos)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self.on_board_click(event.pos)
-        elif event.type == pygame.KEYDOWN and S.DEV_PREVIEW:
-            if event.key == pygame.K_F1:
-                self.open_overlay("win")
-            elif event.key == pygame.K_F2:
-                self.open_overlay("lose")
 
     def update_hover(self, pos):
         _, grid, cell = self.layout()
@@ -249,24 +247,69 @@ class GameScene:
         self.hover_cell = hover
 
     def on_board_click(self, pos):
-        """界面阶段：点击箭头只做选中反馈，消除/碰撞判定留到下一步接入。"""
         _, grid, cell = self.layout()
         target = cell_at(pos, grid, cell, self.state.rows, self.state.cols)
-        if target is None:
-            return
-        direction = self.state.arrow_at(*target)
+        if target is not None:
+            self.resolve_click(target)
+
+    # ---------------------------------------------------------- 核心判定
+    def resolve_click(self, cell):
+        """点一个格子的完整判定：飞得出去就飞出消除，飞不出去就记一次失误。"""
+        direction = self.state.arrow_at(*cell)
         if direction is None:
             return
-        self.selected = target
-        self.select_timer = 0.5
-        self.show_toast(f"已选中「{DIRECTION_NAMES[direction]}」向箭头", S.COLOR_ACCENT, 1.2)
+        if self.is_animating(cell):
+            return                       # 该格动画还没播完，忽略连点
+        if self.state.can_leave(*cell):
+            self.launch(cell, direction)
+        else:
+            self.block(cell, direction)
+
+    def is_animating(self, cell):
+        return any(anim.cell == cell for anim in self.animations)
+
+    def launch(self, cell, direction):
+        """前方无阻挡：箭头立刻从棋盘上移除，同时播一段飞出动画。"""
+        state = self.state
+        distance = state.steps_to_edge(*cell) + 1.5      # 多飞一点，确保完全出屏
+        color = S.ARROW_COLORS[direction]
+        state.remove(*cell)
+        self.animations.append(FlyOut(cell, direction, distance, color))
+        self.hit_cell = None
+        self.hit_timer = 0.0
+
+    def block(self, cell, direction):
+        """前方有阻挡：消耗一次失误，箭头前冲回弹 + 闪白 + 文字提示。"""
+        state = self.state
+        gap = state.steps_to_blocker(*cell)
+        state.add_mistake()
+        self.animations.append(Bounce(cell, direction, gap, S.ARROW_COLORS[direction]))
+        self.hit_cell = cell
+        self.hit_timer = 0.55
+        self.show_toast(
+            f"「{DIRECTION_NAMES[direction]}」向被挡住 · "
+            f"失误 {state.mistakes} / {state.max_mistakes}",
+            S.COLOR_DANGER, 1.6)
 
     def update(self, dt):
         self.time += dt
-        if self.select_timer > 0:
-            self.select_timer = max(0.0, self.select_timer - dt)
+        for anim in list(self.animations):
+            if anim.update(dt):
+                self.animations.remove(anim)
+        if self.hit_timer > 0:
+            self.hit_timer = max(0.0, self.hit_timer - dt)
         if self.toast_timer > 0:
             self.toast_timer = max(0.0, self.toast_timer - dt)
+        self.settle_if_finished()
+
+    def settle_if_finished(self):
+        """等动画播完再结算，避免箭头还在飞就弹出结算面板。"""
+        if self.overlay or self.animations:
+            return
+        if not self.state.arrows:
+            self.open_overlay("win")
+        elif self.state.lost:
+            self.open_overlay("lose")
 
     # ---------------------------------------------------------- 绘制
     def layout(self):
@@ -347,34 +390,70 @@ class GameScene:
                                            S.COLOR_ACCENT, 2,
                                            highlight=True, shade=True)
 
+        busy = {anim.cell for anim in self.animations}
         for row in range(state.rows):
             for col in range(state.cols):
                 center = cell_rect(grid, cell, row, col).center
-                hovered = self.hover_cell == (row, col)
+                hovered = self.hover_cell == (row, col) and (row, col) not in busy
                 if hovered:
                     ui.draw_glow(surface, center, int(tile_px * 0.95), S.COLOR_ACCENT,
                                  alpha=40, layers=22)
                 surface.blit(tile_hover if hovered else tile, tile.get_rect(center=center))
 
+        # 留在棋盘上的箭头（正在碰撞回弹的会带偏移和闪白）
         for (row, col), direction in state.arrows.items():
+            offset, color, scale = self.arrow_pose(row, col, direction, busy)
             center = cell_rect(grid, cell, row, col).center
-            hovered = self.hover_cell == (row, col)
+            center = (center[0] + offset[1] * cell, center[1] + offset[0] * cell)
             ui.draw_arrow(surface, center, cell * S.ARROW_SCALE, direction,
-                          S.ARROW_COLORS[direction], scale=1.06 if hovered else 1.0)
+                          color, scale=scale)
 
-        self.draw_selection(surface, grid, cell, tile_px, tile_radius)
+        # 正在飞出棋盘的箭头
+        for anim in self.animations:
+            if anim.kind == "fly":
+                self.draw_flight(surface, grid, cell, anim)
 
-    def draw_selection(self, surface, grid, cell, tile_px, tile_radius):
-        """点中箭头后扩散一圈同色光环。"""
-        if self.selected is None or self.select_timer <= 0:
+        self.draw_hit_ring(surface, grid, cell, tile_px, tile_radius)
+
+    def arrow_pose(self, row, col, direction, busy):
+        """算出某个箭头的 (位移格数, 颜色, 缩放)：碰撞时前冲、闪白、略微放大。"""
+        base = S.ARROW_COLORS[direction]
+        bounce = next((a for a in self.animations
+                       if a.kind == "bounce" and a.cell == (row, col)), None)
+        if bounce is None:
+            hovered = self.hover_cell == (row, col) and (row, col) not in busy
+            return (0.0, 0.0), base, 1.06 if hovered else 1.0
+        color = ui.mix(base, (255, 246, 246), 0.62 * bounce.flash)
+        return bounce.offset(), color, 1.0 + 0.05 * bounce.flash
+
+    def draw_flight(self, surface, grid, cell, anim):
+        """画出正在飞出的箭头，身后带三段渐隐拖尾。"""
+        dr, dc = DIRECTION_VECTORS[anim.direction]
+        base = cell_rect(grid, cell, *anim.cell).center
+        arrow_size = cell * S.ARROW_SCALE
+        alpha_ratio = anim.alpha / 255.0
+
+        def at(traveled):
+            return (base[0] + dc * traveled * cell, base[1] + dr * traveled * cell)
+
+        for back, ghost_alpha in ((0.62, 34), (0.42, 58), (0.22, 96)):
+            ghost = int(ghost_alpha * alpha_ratio)
+            if ghost > 0:
+                ui.draw_arrow(surface, at(max(0.0, anim.traveled - back)),
+                              arrow_size, anim.direction, anim.color, alpha=ghost)
+        if anim.alpha > 0:
+            ui.draw_arrow(surface, at(anim.traveled), arrow_size,
+                          anim.direction, anim.color, alpha=anim.alpha)
+
+    def draw_hit_ring(self, surface, grid, cell, tile_px, tile_radius):
+        """被挡住时在格子上扩散一圈红色光环。"""
+        if self.hit_cell is None or self.hit_timer <= 0:
             return
-        direction = self.state.arrow_at(*self.selected)
-        color = S.ARROW_COLORS.get(direction, S.COLOR_ACCENT)
-        center = cell_rect(grid, cell, *self.selected).center
-        t = 1.0 - self.select_timer / 0.5           # 0 → 1
+        center = cell_rect(grid, cell, *self.hit_cell).center
+        t = 1.0 - self.hit_timer / 0.55           # 0 → 1
         grow = int(4 + t * 18)
         ring = pygame.Surface((tile_px + grow * 2, tile_px + grow * 2), pygame.SRCALPHA)
-        pygame.draw.rect(ring, (*color, int(215 * (1 - t))), ring.get_rect(),
+        pygame.draw.rect(ring, (*S.COLOR_DANGER, int(215 * (1 - t))), ring.get_rect(),
                          width=3, border_radius=tile_radius + grow)
         surface.blit(ring, ring.get_rect(center=center))
 
@@ -389,17 +468,11 @@ class GameScene:
             text = "点击箭头：前方无阻挡 → 飞出棋盘；有阻挡 → 消耗 1 次失误"
             width = ui.text_width(text, 18) + 46
             pill = pygame.Rect(0, 0, width, 38)
-            pill.center = (S.WINDOW_WIDTH // 2, line_y + 24)
+            pill.center = (S.WINDOW_WIDTH // 2, line_y + S.BOTTOM_BAR_HEIGHT // 2)
             surface.blit(ui.round_rect_surface(pill.size, 19, S.COLOR_CHIP_TOP,
                                                S.COLOR_CHIP_BOTTOM, S.COLOR_CHIP_BORDER, 1),
                          pill.topleft)
             ui.draw_text(surface, text, 18, S.COLOR_TEXT_DIM, pill.center)
-
-        if S.DEV_PREVIEW:
-            ui.draw_text(surface,
-                         "【界面阶段】点击箭头目前只做选中反馈，消除 / 碰撞判定待接入 · "
-                         "F1 预览通关 · F2 预览失败",
-                         15, S.COLOR_WARN, (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - 18))
 
     def draw_toast(self, surface):
         if self.toast_timer <= 0 or not self.toast_text:
@@ -407,7 +480,8 @@ class GameScene:
         alpha = int(255 * min(1.0, self.toast_timer / 0.4))
         image = ui.font(19, bold=True).render(self.toast_text, True, self.toast_color)
         pill = image.get_rect().inflate(48, 22)
-        pill.center = (S.WINDOW_WIDTH // 2, S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT + 24)
+        pill.center = (S.WINDOW_WIDTH // 2,
+                       S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT + S.BOTTOM_BAR_HEIGHT // 2)
 
         layer = pygame.Surface(pill.size, pygame.SRCALPHA)
         pygame.draw.rect(layer, (*S.COLOR_BOARD_BOTTOM, min(240, alpha)),
