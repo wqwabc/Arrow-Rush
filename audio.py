@@ -155,16 +155,15 @@ def init():
     global _sounds, _ready, _rate, _channels
     if _ready:
         return True
+    # 只在 mixer 还没起来时才去初始化。
+    # pygame.init() 通常已经按系统默认配置开好了 mixer，这时再 quit 重开，
+    # 在部分机器上会失败，反而把本来能用的音频弄哑，所以不要动它。
     try:
-        if pygame.mixer.get_init():
-            pygame.mixer.quit()
-        pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
     except pygame.error:
-        try:                                  # 退回 pygame 默认配置再试一次
-            pygame.mixer.init()
-        except pygame.error:
-            _ready = False
-            return False
+        _ready = False
+        return False
 
     info = pygame.mixer.get_init()
     if not info:

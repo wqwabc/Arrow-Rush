@@ -132,6 +132,27 @@ def notice_alpha(timer, duration=0.4):
     return int(255 * min(1.0, timer / duration))
 
 
+def make_sound_button(rect, app, font_size=18):
+    """音效开关按钮。
+
+    除了 M 快捷键，也给一个能直接点的按钮——快捷键不写出来没人知道，
+    而音效开关没有可见状态时，按下去"有没有生效"根本看不出来。
+    """
+    button = Button(rect, "音效", app.toggle_mute, font_size=font_size)
+    refresh_sound_label(button)
+    return button
+
+
+def refresh_sound_label(button):
+    """按钮文字直接写明当前音效状态。"""
+    if not audio.is_ready():
+        button.label = "音效：无"
+        button.enabled = False
+    else:
+        button.enabled = True
+        button.label = "音效：关" if audio.is_muted() else "音效：开"
+
+
 def draw_panel(surface, rect, radius=20, top_color=None, bottom_color=None,
                border_color=None, border_width=2, shadow_alpha=100, shadow_offset=(0, 8)):
     """画一张浮起的面板：阴影 + 渐变底 + 描边 + 顶部高光。"""
@@ -156,26 +177,62 @@ class StartScene:
         self.notice_duration = 1.0
         cx = S.WINDOW_WIDTH // 2
         session = app.session
+        # 「新游戏」是清空记录的入口，只要还有记录可清就该显示。
+        # 不能只看有没有单局存档——打完一关时存档会被清掉，但通关记录还在，
+        # 这时候按钮消失反而最让人困惑。
+        can_reset = session.exists or app.progress.cleared_count > 0
         if session.exists:
             primary = (f"继续第 {session.level_index + 1} 关", app.continue_game)
-            secondary = [("新游戏", app.start_new_game),
-                         ("选择关卡", app.goto_select),
-                         ("退出游戏", app.quit)]
-            second_w, second_gap = 168, 14
         else:
-            primary = ("开 始 游 戏", app.start_new_game)
-            secondary = [("选择关卡", app.goto_select),
-                         ("退出游戏", app.quit)]
-            second_w, second_gap = 185, 14
+            primary = ("开 始 游 戏", app.start_play)
+
+        secondary = []
+        if can_reset:
+            secondary.append(("新游戏", self.request_new_game, True))
+        secondary.append(("选择关卡", app.goto_select, False))
+        secondary.append(("退出游戏", app.quit, False))
+        second_w = 168 if len(secondary) == 3 else 185
+        second_gap = 14
 
         self.buttons = [Button((cx - 150, 532, 300, 64), primary[0], primary[1],
                                style="primary", font_size=27)]
         total = len(secondary) * second_w + (len(secondary) - 1) * second_gap
         x = cx - total // 2
-        for label, callback in secondary:
-            self.buttons.append(Button((x, 608, second_w, 48), label, callback,
-                                       font_size=20))
+        self.new_button = None
+        for label, callback, is_new in secondary:
+            button = Button((x, 608, second_w, 48), label, callback, font_size=20)
+            self.buttons.append(button)
+            if is_new:
+                self.new_button = button
             x += second_w + second_gap
+
+        self.sound_button = make_sound_button(
+            (S.WINDOW_WIDTH - 40 - 132, 28, 132, 40), app)
+        self.buttons.append(self.sound_button)
+
+        self.new_game_armed = False      # 「新游戏」要先确认一次，避免误触清空成绩
+        self.new_game_timer = 0.0
+
+    # ---------------------------------------------------------- 新游戏确认
+    def request_new_game(self):
+        """「新游戏」会清空全部通关记录，所以要点两次，第一次只做提示。"""
+        if not self.new_game_armed:
+            self.new_game_armed = True
+            self.new_game_timer = 4.0
+            if self.new_button is not None:
+                self.new_button.label = "再点确认清空"
+                self.new_button.style = "danger"
+            self.show_notice("新游戏会清空全部通关记录与成绩，再点一次确认", 3.2)
+            return
+        self.disarm_new_game()
+        self.app.start_new_game()
+
+    def disarm_new_game(self):
+        self.new_game_armed = False
+        self.new_game_timer = 0.0
+        if self.new_button is not None:
+            self.new_button.label = "新游戏"
+            self.new_button.style = "normal"
 
     def on_escape(self):
         self.app.quit()
@@ -188,6 +245,11 @@ class StartScene:
         self.time += dt
         if self.notice_timer > 0:
             self.notice_timer = max(0.0, self.notice_timer - dt)
+        if self.new_game_armed:
+            self.new_game_timer -= dt
+            if self.new_game_timer <= 0:      # 超时自动取消，避免一直停在待确认状态
+                self.disarm_new_game()
+        refresh_sound_label(self.sound_button)   # M 快捷键也会改状态，每帧同步一次
         for button in self.buttons:
             button.update(dt)
 
@@ -249,8 +311,7 @@ class StartScene:
                      f"已通关 {progress.cleared_count} / {len(LEVELS)} 关 · "
                      f"总分 {score.format_score(progress.total_score)}",
                      16, S.COLOR_TEXT_DIM, (cx, 690))
-        ui.draw_text(surface, "按 Esc 退出游戏 · 按 M 静音", 16,
-                     S.COLOR_TEXT_FAINT, (cx, 722))
+        ui.draw_text(surface, "按 Esc 退出游戏", 16, S.COLOR_TEXT_FAINT, (cx, 722))
         self.draw_notice(surface)
 
 
@@ -294,10 +355,11 @@ class GameScene:
                    self.goto_select, font_size=19),
         ]
         bar_y = S.WINDOW_HEIGHT - S.BOTTOM_BAR_HEIGHT + 14
-        self.undo_button = Button((644, bar_y, 112, 44), "撤销",
-                                  self.undo, font_size=19)
-        self.hint_button = Button((768, bar_y, 112, 44), "提示",
-                                  self.use_hint, font_size=19)
+        self.sound_button = make_sound_button((536, bar_y, 108, 44), app)
+        self.undo_button = Button((654, bar_y, 108, 44), "撤销",
+                                  self.undo, font_size=18)
+        self.hint_button = Button((772, bar_y, 108, 44), "提示",
+                                  self.use_hint, font_size=18)
         self.refresh_action_buttons()
 
     # ---------------------------------------------------------- 对外动作
@@ -322,7 +384,8 @@ class GameScene:
             self.save_progress()
 
     def replay_all(self):
-        self.app.start_new_game()
+        """全部通关后的「再玩一遍」：保留成绩，从第 1 关重打一轮。"""
+        self.app.restart_playthrough()
 
     def goto_select(self):
         self.app.goto_select()
@@ -405,9 +468,11 @@ class GameScene:
         self.hint_button.enabled = self.hints_left > 0
         self.undo_button.label = f"撤销 ×{self.undos_left}"
         self.undo_button.enabled = self.undos_left > 0 and bool(self.history)
+        refresh_sound_label(self.sound_button)
 
     def all_buttons(self):
-        return self.buttons + [self.undo_button, self.hint_button] + self.overlay_buttons
+        return (self.buttons + [self.sound_button, self.undo_button, self.hint_button]
+                + self.overlay_buttons)
 
     def use_hint(self):
         """标出一个当前能直接消掉的箭头，供玩家参考。"""
@@ -476,10 +541,8 @@ class GameScene:
                 button.handle_event(event)
             return
 
-        for button in self.buttons:
+        for button in self.all_buttons():
             button.handle_event(event)
-        self.undo_button.handle_event(event)
-        self.hint_button.handle_event(event)
 
         if event.type == pygame.MOUSEMOTION:
             self.update_hover(event.pos)
@@ -557,6 +620,7 @@ class GameScene:
             if self.appear_anims[cell].update(dt):
                 del self.appear_anims[cell]
         self.update_hover_anim(dt)
+        refresh_sound_label(self.sound_button)   # M 快捷键也会改状态，每帧同步一次
         for button in self.all_buttons():
             button.update(dt)
         if self.hit_timer > 0:
@@ -809,7 +873,7 @@ class GameScene:
 
         # toast 和提示文字占同一格，两者同时画会互相压字，所以 toast 显示时让位
         if self.toast_timer <= 0:
-            text = "点击箭头：前方无阻挡 → 飞出棋盘；有阻挡 → 消耗 1 次失误"
+            text = "点击箭头：无阻挡则飞出，有阻挡扣 1 次失误"
             width = ui.text_width(text, 18) + 46
             pill = pygame.Rect(40, 0, width, 38)
             pill.centery = line_y + S.BOTTOM_BAR_HEIGHT // 2
@@ -819,13 +883,14 @@ class GameScene:
             ui.draw_text(surface, text, 18, S.COLOR_TEXT_DIM,
                          (pill.x + 23, pill.centery), anchor="midleft")
 
+        self.sound_button.draw(surface)
         self.undo_button.draw(surface)
         self.hint_button.draw(surface)
 
     def draw_toast(self, surface):
         if self.toast_timer <= 0 or not self.toast_text:
             return
-        # 左对齐，给右下角的撤销 / 提示按钮让位；出现时从左侧滑入
+        # 左对齐，给右下角的按钮让位；出现时从左侧滑入
         shown = self.toast_duration - self.toast_timer
         slide = 1.0 - ease_out_cubic(min(1.0, shown / 0.16))
         draw_toast_pill(surface, self.toast_text, self.toast_color,
@@ -984,6 +1049,9 @@ class SelectScene:
             Button((cx - 95, 610, 190, 46), "返回主菜单", self.app.goto_start,
                    font_size=19),
         ]
+        self.sound_button = make_sound_button(
+            (S.WINDOW_WIDTH - 40 - 132, 28, 132, 40), app)
+        self.buttons.append(self.sound_button)
 
     # ---------------------------------------------------------- 状态
     def is_unlocked(self, index):
@@ -1026,6 +1094,7 @@ class SelectScene:
         self.time += dt
         if self.notice_timer > 0:
             self.notice_timer = max(0.0, self.notice_timer - dt)
+        refresh_sound_label(self.sound_button)
         for button in self.buttons:
             button.update(dt)
 
