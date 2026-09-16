@@ -1,0 +1,12 @@
+# 一箭又一箭 —— 依赖
+#
+# 安装：pip install -r requirements.txt
+#
+# 只需要 pygame。游戏不含任何图片 / 音频素材，
+# 箭头是代码画的矢量图形，音效是代码合成的波形。
+
+pygame>=2.1.0
+
+# NumPy 是可选的：装了只是让音效生成快一倍（约 46ms vs 86ms），
+# 不装也能正常玩（audio.py 里有纯 Python 的回退实现）。
+# numpy>=1.20
