@@ -36,7 +36,6 @@ pip install -r requirements.txt
 ### 运行
 
 ```bash
-cd 游戏开发
 python main.py
 ```
 
